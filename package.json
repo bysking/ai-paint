@@ -1,8 +1,9 @@
 {
   "name": "ai-paint",
-  "version": "0.1.4",
+  "version": "1.0.0",
   "description": "Excalidraw风格的手绘画布绘图引擎（TypeScript），封装为面向AI代理的MCP服务器",
   "type": "module",
+  "author": "bysking@qq.com",
   "bin": {
     "ai-paint": "./dist/cli.js"
   },
