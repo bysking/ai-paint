@@ -1,7 +1,7 @@
 {
-  "name": "ai-paint",
+  "name": "@bysking/ai-paint",
   "version": "1.0.0",
-  "description": "Excalidraw风格的手绘画布绘图引擎（TypeScript），封装为面向AI代理的MCP服务器",
+  "description": "Excalidraw风格的手绘画布绘图引擎MCP（TypeScript），封装为面向AI代理的MCP服务器",
   "type": "module",
   "author": "bysking@qq.com",
   "bin": {
@@ -41,7 +41,25 @@
     "tsx": "^4.16.0",
     "typescript": "^5.5.4"
   },
+  "license": "MIT",
+  "publishConfig": {
+    "registry": "https://registry.npmjs.org/",
+    "access": "public"
+  },
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/bysking/ai-paint.git"
+  },
+  "homepage": "https://github.com/bysking/ai-paint#readme",
   "keywords": [
+    "coding-agent",
+    "ai-paint",
+    "ai",
+    "terminal",
+    "agent",
+    "mcp",
+    "@bysking/ai-paint",
+    "bysking",
     "mcp",
     "excalidraw",
     "canvas",
@@ -50,6 +68,5 @@
     "rough",
     "svg",
     "agent"
-  ],
-  "license": "MIT"
+  ]
 }

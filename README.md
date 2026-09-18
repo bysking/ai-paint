@@ -185,21 +185,9 @@ node --version
 打开终端，执行：
 
 ```bash
-npm install -g ai-paint
+npm install -g @bysking/ai-paint
 ```
 
-安装完成后验证：
-
-```bash
-ai-paint --help    # 或直接输入 ai-paint
-```
-
-如果显示 MCP 服务正在等待输入（没有报错），说明安装成功。按 `Ctrl+C` 退出。
-
-> 💡 **Mac 用户提示**：若提示权限错误，在命令前加 `sudo`：
-> ```bash
-> sudo npm install -g ai-paint
-> ```
 
 ### 3.3 接入 AI 客户端
 
@@ -213,6 +201,7 @@ ai-paint 是一个 MCP 服务，需要在你的 AI 客户端（如 Claude Deskto
 ```json
 {
   "mcpServers": {
+    "type": "stdio",
     "ai-paint": {
       "command": "ai-paint",
       "args": []
