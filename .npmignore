@@ -1,0 +1,13 @@
+# 构建脚本（files 白名单 dist/README 已排除大部分，这里兜底）
+build.mjs
+build-cleanup.mjs
+*.ts
+src/
+test/
+node_modules/
+.ai-paint/
+.git/
+.gitignore
+demo*.svg
+*.png
+npm-debug.log*

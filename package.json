@@ -1,0 +1,54 @@
+{
+  "name": "ai-paint",
+  "version": "0.1.4",
+  "description": "Excalidraw风格的手绘画布绘图引擎（TypeScript），封装为面向AI代理的MCP服务器",
+  "type": "module",
+  "bin": {
+    "ai-paint": "./dist/cli.js"
+  },
+  "main": "./dist/lib.js",
+  "exports": {
+    ".": "./dist/lib.js",
+    "./cli": "./dist/cli.js"
+  },
+  "files": [
+    "dist",
+    "README.md"
+  ],
+  "engines": {
+    "node": ">=18.0.0"
+  },
+  "scripts": {
+    "build": "tsc -p tsconfig.json",
+    "bundle": "node build.mjs",
+    "prepack": "npm run build && npm run bundle && node build-cleanup.mjs",
+    "dev": "tsx src/index.ts",
+    "start": "node dist/index.js",
+    "cli": "node dist/cli.js",
+    "sample": "tsx src/demo.ts",
+    "demo": "node dist/index.js demo",
+    "test": "npm run build && node --test \"test/*.test.mjs\"",
+    "smoke": "npm run build && node test/smoke.mjs"
+  },
+  "dependencies": {
+    "@antv/layout": "^2.0.0",
+    "@resvg/resvg-js": "^2.6.2"
+  },
+  "devDependencies": {
+    "@types/node": "^20.14.0",
+    "esbuild": "^0.28.2",
+    "tsx": "^4.16.0",
+    "typescript": "^5.5.4"
+  },
+  "keywords": [
+    "mcp",
+    "excalidraw",
+    "canvas",
+    "drawing",
+    "sketch",
+    "rough",
+    "svg",
+    "agent"
+  ],
+  "license": "MIT"
+}

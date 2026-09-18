@@ -1,0 +1,6 @@
+node_modules/
+dist/
+.ai-paint/
+*.log
+.DS_Store
+demo*.svg
