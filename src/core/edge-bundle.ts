@@ -42,6 +42,10 @@ export interface EdgeRequest {
   branch?: DiamondBranch
   /** 回边（构成环、从下游回到上游的边）。目标入点选垂直主布局方向的侧。 */
   backedge?: boolean
+  /** 架构图：源/目标模块所在的层框（层感知路由用）。 */
+  fromLayer?: { x: number; y: number; width: number; height: number }
+  toLayer?: { x: number; y: number; width: number; height: number }
+  allLayers?: { x: number; y: number; width: number; height: number }[]
 }
 
 export interface BundleOptions {
@@ -54,10 +58,49 @@ export interface BundleOptions {
   separateInOut?: boolean
   /** 全局布局方向默认值（TB/LR），被未单独指定 direction 的 EdgeRequest 继承。 */
   direction?: 'LR' | 'TB'
+  /** 额外的路由障碍物（如架构图的层框 frame）：仅参与避障，不作为锚点候选。
+   *  按边返回，因为层框必须对「起点或终点位于其中的边」豁免 —— 否则边永远
+   *  出不了自己的层框，正交路由会整体判定阻塞并退回不避障的兜底路径。 */
+  extraObstaclesFor?: (fromKey: string, toKey: string) => ConnectorNode[]
 }
 
 export interface RoutedBundle {
   edges: (RoutedEdge & { key: string })[]
+}
+
+/**
+ * 回边走哪一侧走廊（必须与 externalBackedgeRoute 的判定一致）。
+ * 按「源+目标的横向中心相对全图中心」选，取离两端都近的那侧。
+ */
+function backedgeLaneSide(
+  nodeMap: Map<string, ConnectorNode>,
+  fromKey: string,
+  toKey: string,
+  direction: 'LR' | 'TB',
+): Side {
+  const nodes = [...nodeMap.values()]
+  if (direction === 'LR') {
+    let minY = Infinity
+    let maxY = -Infinity
+    for (const n of nodes) {
+      minY = Math.min(minY, n.y)
+      maxY = Math.max(maxY, n.y + n.height)
+    }
+    const f = nodeMap.get(fromKey)
+    const t = nodeMap.get(toKey)
+    if (!f || !t) return 'bottom'
+    return (f.y + f.height / 2 + t.y + t.height / 2) / 2 >= (minY + maxY) / 2 ? 'bottom' : 'top'
+  }
+  let minX = Infinity
+  let maxX = -Infinity
+  for (const n of nodes) {
+    minX = Math.min(minX, n.x)
+    maxX = Math.max(maxX, n.x + n.width)
+  }
+  const f = nodeMap.get(fromKey)
+  const t = nodeMap.get(toKey)
+  if (!f || !t) return 'right'
+  return (f.x + f.width / 2 + t.x + t.width / 2) / 2 >= (minX + maxX) / 2 ? 'right' : 'left'
 }
 
 /** 节点中心。 */
@@ -166,10 +209,18 @@ export function routeEdgeBundle(
     if (!fromN || !toN) return null
     const fC = centerOf(fromN)
     const tC = centerOf(toN)
+    // 选边规则与 connectors.pickSide 保持一致：分层图优先走主方向侧，
+    // 避免横向位移略大时误选水平桩点导致连线斜穿整图。
     const pick = (fc: { x: number; y: number }, tc: { x: number; y: number }): 'top' | 'bottom' | 'left' | 'right' => {
       const dx = tc.x - fc.x
       const dy = tc.y - fc.y
-      if (Math.abs(dx) >= Math.abs(dy)) return dx >= 0 ? 'right' : 'left'
+      const adx = Math.abs(dx)
+      const ady = Math.abs(dy)
+      const dir = req.direction ?? globalDirection
+      const MAIN_AXIS_MIN = 8
+      if (dir === 'TB' && ady > MAIN_AXIS_MIN) return dy > 0 ? 'bottom' : 'top'
+      if (dir === 'LR' && adx > MAIN_AXIS_MIN) return dx > 0 ? 'right' : 'left'
+      if (adx >= ady) return dx >= 0 ? 'right' : 'left'
       return dy >= 0 ? 'bottom' : 'top'
     }
     // 自环边：不参与选边（由最终路由按 selfSide 生成环）
@@ -207,31 +258,29 @@ export function routeEdgeBundle(
     if (r.req.from === r.req.to || r.req.backedge) continue
     countIn(r.req.to, r.toSide)
   }
-  // 回边：优先选垂直主方向侧中入边最少者；若两侧都占满，回退主方向侧
-  const backedgeDir = globalDirection
-  for (const r of routed) {
-    if (r.req.from === r.req.to || !r.req.backedge) continue
-    const toN = nodeMap.get(r.req.to)
-    if (!toN) continue
-    const m = inCountBySide.get(r.req.to)
-    const perpendicular: Side[] = backedgeDir === 'TB' ? ['left', 'right'] : ['top', 'bottom']
-    const mainDir: Side[] = backedgeDir === 'TB' ? ['top', 'bottom'] : ['left', 'right']
-    const perpCounts = perpendicular
-      .map((s) => ({ side: s, n: m?.get(s) ?? 0 }))
-      .sort((a, b) => a.n - b.n)
-    // 垂直侧若有一侧未占用 → 选占用最少者；否则退到主方向侧最少者
-    const bestPerp = perpCounts[0]
-    let chosen: Side
-    if (bestPerp.n === 0) {
-      chosen = bestPerp.side
-    } else {
-      const mainCounts = mainDir
-        .map((s) => ({ side: s, n: m?.get(s) ?? 0 }))
-        .sort((a, b) => a.n - b.n)
-      chosen = mainCounts[0].side
-    }
-    r.toSide = chosen
-    countIn(r.req.to, chosen)
+  // 回边：通道（gutter）由 routeEdge 按整图包围盒决定，但【锚点槽位】仍需协调 ——
+  // 多条回边汇入同一节点时，如果都用中心锚点，箭头会叠在同一个点上。
+  // 回边不参与下面的通用槽位分配（那套按"对齐/非对齐"排序，对回边没意义），
+  // 这里直接按汇入序号给对称槽位（±1、±2 …），借 slotTo 传下去。
+  // 按【走廊侧】分组，而不是按目标节点 —— 多条回边即使汇入不同节点，
+  // 只要走同一侧走廊就会叠在同一条竖线上。这里按侧分组后给每条边一个序号，
+  // 由 externalBackedgeRoute 用该序号把走廊逐条外扩。
+  const backedgeSeq = new Map<number, number>() // routed 索引 → 该走廊内的序号
+  const laneGroups = new Map<Side, number[]>()
+  routed.forEach((r, i) => {
+    if (r.req.from === r.req.to || !r.req.backedge) return
+    const laneSide = backedgeLaneSide(nodeMap, r.req.from, r.req.to, globalDirection)
+    if (!laneGroups.has(laneSide)) laneGroups.set(laneSide, [])
+    laneGroups.get(laneSide)!.push(i)
+    countIn(r.req.to, r.toSide)
+  })
+  // 同一走廊内按序号交错展开：0 → 0，1 → +1，2 → -1，3 → +2 …，
+  // 保证相邻回边的走廊间距恒为 EDGE_SPACING，且对称分布在基准线两侧。
+  for (const idxs of laneGroups.values()) {
+    idxs.forEach((ri, ord) => {
+      const slot = ord === 0 ? 0 : (ord % 2 === 1 ? 1 : -1) * Math.ceil(ord / 2)
+      backedgeSeq.set(ri, slot)
+    })
   }
 
   // ---- 2. 槽位分配：同一节点同一侧的边按目标位置排序，错开成扇形 ----
@@ -388,6 +437,77 @@ export function routeEdgeBundle(
     }
   }
 
+  // ---- 3.5 绝对锚点去冲突（架构图层间路由专需）----
+  // 上面的槽位是「相对同一模块」的序号，不同模块的槽位 0 各自落在中心线上。
+  // 但层间路由的垂直段按绝对 x 绘制，两个不同模块锚点 x 相同时，
+  // 垂直段会完全重叠（实测 user→redis 与 product→mysql 重叠 172px）。
+  // 这里按「同一层间空隙 + 同侧（出/入）」分组，把冲突锚点沿 x 推开。
+  const absAnchor = new Map<number, { out?: number; in?: number }>()
+  {
+    type Rec = { idx: number; side: 'out' | 'in'; x: number; min: number; max: number }
+    const groups = new Map<string, Rec[]>()
+    const anchorOf = (mod: ConnectorNode, slot: number) => {
+      const c = mod.x + mod.width / 2
+      return Math.max(
+        mod.x + EDGE_SPACING,
+        Math.min(mod.x + mod.width - EDGE_SPACING, c + slot * EDGE_SPACING),
+      )
+    }
+    routed.forEach((r, i) => {
+      if (r.req.from === r.req.to) return
+      const fl = r.req.fromLayer
+      const tl = r.req.toLayer
+      if (!fl || !tl) return
+      if (fl.x === tl.x && fl.y === tl.y && fl.width === tl.width) return
+      const fromAbove = fl.y + fl.height <= tl.y
+      const toAbove = tl.y + tl.height <= fl.y
+      if (!fromAbove && !toAbove) return
+
+      const fromMod = nodeMap.get(r.req.from)
+      const toMod = nodeMap.get(r.req.to)
+      if (!fromMod || !toMod) return
+      const [upper, lower] = fromAbove ? [fromMod, toMod] : [toMod, fromMod]
+      const [upperLayer, lowerLayer] = fromAbove ? [fl, tl] : [tl, fl]
+      // 分组键用【上层框】而不是「层间空隙」：
+      // 跨多层连线（如 业务层→数据层，跨过中间件层）与相邻层连线的空隙不同，
+      // 它们的垂直段却同样从上层框底部出发，会在同一段区间内重叠。
+      // 按上层框分组才能捕获这类冲突。
+      const [uSlot, lSlot] = fromAbove
+        ? [slotFrom.get(i) ?? 0, slotTo.get(i) ?? 0]
+        : [slotTo.get(i) ?? 0, slotFrom.get(i) ?? 0]
+
+      for (const [side, mod, slot] of [
+        ['out', upper, uSlot],
+        ['in', lower, lSlot],
+      ] as const) {
+        // 出线按【上层框】分组；入线按【下层框】分组（入线垂直段贴着下层框顶边）
+        const layerKey = side === 'out' ? `${upperLayer.y}` : `${lowerLayer.y}`
+        const key = `${layerKey}#${side}`
+        if (!groups.has(key)) groups.set(key, [])
+        groups.get(key)!.push({
+          idx: i,
+          side,
+          x: anchorOf(mod, slot),
+          min: mod.x + EDGE_SPACING,
+          max: mod.x + mod.width - EDGE_SPACING,
+        })
+      }
+    })
+
+    // 同组内按 x 排序，相邻间距不足 EDGE_SPACING 时把后者推到位（不超出模块边界）
+    for (const recs of groups.values()) {
+      recs.sort((a, b) => a.x - b.x)
+      for (let k = 1; k < recs.length; k++) {
+        const need = recs[k - 1].x + EDGE_SPACING
+        if (recs[k].x < need - 0.5) recs[k].x = Math.min(recs[k].max, need)
+      }
+      for (const rec of recs) {
+        const cur = absAnchor.get(rec.idx) ?? {}
+        absAnchor.set(rec.idx, { ...cur, [rec.side]: rec.x })
+      }
+    }
+  }
+
   // ---- 4. 最终路由 ----
   const allNodes = [...nodeMap.values()]
   const edges: (RoutedEdge & { key: string })[] = []
@@ -401,8 +521,15 @@ export function routeEdgeBundle(
     if (separated.has(i)) {
       type = type === 'straight' ? 'orthogonal' : type === 'orthogonal' ? 'orthogonal' : 'bezier'
     }
-    const slotF = slotFrom.get(i) ?? 0
-    const slotT = slotTo.get(i) ?? 0
+    // 回边不走通用槽位分配（见上文），改为按「汇入序号」给对称槽位：
+    // 第 1 条落 -1，第 2 条落 +1，第 3 条落 -2 …，保证箭头沿目标边均匀散开。
+    let slotF = slotFrom.get(i) ?? 0
+    let slotT = slotTo.get(i) ?? 0
+    if (req.backedge && !isSelf) {
+      const slot = backedgeSeq.get(i) ?? 0
+      slotT = slot
+      slotF = slot // 源端也用同样偏移，走廊两侧对称展开
+    }
     const selfN = isSelf ? (selfCount.get(req.from) ?? 0) : 0
     if (isSelf) selfCount.set(req.from, selfN + 1)
     const selfSide = isSelf ? (['right', 'bottom', 'left', 'top'][selfN % 4] as 'top' | 'right' | 'bottom' | 'left') : undefined
@@ -421,11 +548,20 @@ export function routeEdgeBundle(
       direction: req.direction,
       branch: req.branch,
       backedge: req.backedge,
+      fromLayer: req.fromLayer,
+      toLayer: req.toLayer,
+      // 经 3.5 全局去冲突后的绝对锚点（覆盖相对槽位）
+      absFromX: absAnchor.get(i)?.out,
+      absToX: absAnchor.get(i)?.in,
+      allLayers: req.allLayers,
       // 用预路由协调后的桩点（回边目标侧已选占用最少的侧）
       fromSide: r.fromSide,
       toSide: r.toSide,
-      // 正交避障：排除 from/to 自身
-      obstacles: allNodes.filter((n) => n.key !== req.from && n.key !== req.to),
+      // 正交避障：排除 from/to 自身；额外障碍物（层框）一并参与绕行。
+      // 层框对「端点所在的框」豁免，否则边无法离开自己的层。
+      obstacles: [...allNodes, ...(opts.extraObstaclesFor?.(req.from, req.to) ?? [])].filter(
+        (n) => n.key !== req.from && n.key !== req.to,
+      ),
     })
     edges.push({ ...edge, key: `${req.from}->${req.to}` })
   })

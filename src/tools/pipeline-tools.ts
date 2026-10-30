@@ -14,6 +14,7 @@ import { createElement, type Scene } from '../core/scene.js'
 import { planDiagram, PlanStore, type FinalPlan } from '../core/plan.js'
 import { renderSceneSvg } from '../core/render.js'
 import { centerScene, fitSceneContent } from '../core/fit.js'
+import { DEF_COLUMN_GAP, DEF_ROW_GAP } from '../core/layout.js'
 import type { SceneStore } from '../mcp/store.js'
 import type { ToolRegistry } from './registry.js'
 import { bool, color, intNum, str } from './validators.js'
@@ -179,8 +180,8 @@ export function registerPipelineTools(reg: ToolRegistry, store: SceneStore): voi
           type: 'array',
           description: '架构图跨层依赖：[{ from, to, label?, type?, dashed? }]（type=architecture 时用）。',
         },
-        column_gap: { type: 'number', description: '列间距。默认 80。' },
-        row_gap: { type: 'number', description: '行间距。默认 50。' },
+        column_gap: { type: 'number', description: '同层节点之间的实际像素间隙。默认 60。' },
+        row_gap: { type: 'number', description: '相邻层之间的实际像素间隙。默认 70。' },
         padding: { type: 'number', description: '外边距。默认 60。' },
         direction: { type: 'string', enum: ['TB', 'LR'], description: '流程/树布局方向。默认 TB。' },
         export_svg_png: { type: 'boolean', description: '是否同时导出 svg+png 到本地。默认 true。' },
@@ -250,8 +251,8 @@ export function registerPipelineTools(reg: ToolRegistry, store: SceneStore): voi
         title: str(args.title) || undefined,
         description: str(args.description) || undefined,
         kind: layoutKind,
-        columnGap: intNum(args.column_gap, 'column_gap', 10, 1000, 80),
-        rowGap: intNum(args.row_gap, 'row_gap', 10, 1000, 50),
+        columnGap: intNum(args.column_gap, 'column_gap', 10, 1000, DEF_COLUMN_GAP),
+        rowGap: intNum(args.row_gap, 'row_gap', 10, 1000, DEF_ROW_GAP),
         padding: intNum(args.padding, 'padding', 0, 2000, 60),
         direction: str(args.direction, 'TB') === 'LR' ? 'LR' : 'TB',
       })

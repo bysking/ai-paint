@@ -14,6 +14,8 @@
 
 import {
   computeLayout,
+  DEF_COLUMN_GAP,
+  DEF_ROW_GAP,
   type LayoutNodeSpec,
   type LayoutEdgeSpec,
   type LayoutKind,
@@ -419,7 +421,7 @@ export interface PlanResult {
   fromCache: boolean
 }
 
-const DEFAULT_LAYOUT_OPTS: LayoutOptions = { columnGap: 80, rowGap: 50, padding: 60 }
+const DEFAULT_LAYOUT_OPTS: LayoutOptions = { columnGap: DEF_COLUMN_GAP, rowGap: DEF_ROW_GAP, padding: 60 }
 
 function layoutOpts(opts: PlanOptions): LayoutOptions {
   return {
@@ -439,8 +441,8 @@ function fingerprintOf(nodes: unknown, edges: unknown, kind: string, opts: PlanO
     edges,
     kind,
     direction: opts.direction ?? 'TB',
-    columnGap: opts.columnGap ?? 80,
-    rowGap: opts.rowGap ?? 50,
+    columnGap: opts.columnGap ?? DEF_COLUMN_GAP,
+    rowGap: opts.rowGap ?? DEF_ROW_GAP,
     padding: opts.padding ?? 60,
   })
   return hashSeed(stable).toString(36)

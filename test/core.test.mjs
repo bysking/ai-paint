@@ -2,7 +2,7 @@ import { test } from 'node:test'
 import assert from 'node:assert/strict'
 import { computeLayout } from '../dist/core/layout.js'
 import { shapeGeometry, SHAPE_TYPES } from '../dist/core/shapes.js'
-import { routeEdge, anchorPoint, contactPoint, pickSide } from '../dist/core/connectors.js'
+import { routeEdge, anchorPoint, contactPoint, pickSide, END_GAP } from '../dist/core/connectors.js'
 import { routeEdgeBundle, edgesOverlap } from '../dist/core/edge-bundle.js'
 import { planSequenceDiagram } from '../dist/core/sequence.js'
 import { planErDiagram } from '../dist/core/er.js'
@@ -175,19 +175,21 @@ test('cylinder 形状有顶盖椭圆', () => {
 
 // ---------- connectors ----------
 
-test('routeEdge: straight 连线从节点边线中心出发（箭头不压边）', () => {
+test('routeEdge: 连线两端与节点边框留出 END_GAP 空隙', () => {
   const from = { key: 'a', shape: 'rectangle', x: 0, y: 0, width: 100, height: 60 }
   const to = { key: 'b', shape: 'rectangle', x: 300, y: 0, width: 100, height: 60 }
   const edge = routeEdge(from, to, { type: 'straight' })
-  // from 在右侧：起点应在右边缘【外侧】ARROW_GAP（x≈100+6=106，y≈30）
   assert.equal(edge.fromSide, 'right')
-  assert.ok(Math.abs(edge.points[0].x - 106) < 3, `起点 x=${edge.points[0].x} 应在边线外侧 6px`)
-  assert.ok(Math.abs(edge.points[0].y - 30) < 3, `起点 y=${edge.points[0].y} 应为右边缘中心`)
-  // 终点同理在左侧外（x≈300-6=294）
   assert.equal(edge.toSide, 'left')
-  assert.ok(Math.abs(edge.points[1].x - 294) < 3, `终点 x=${edge.points[1].x} 应在边线外侧`)
-  // 箭头尖端恰好触边（在边线上 x=300）
-  assert.ok(Math.abs(edge.arrowTip.x - 300) < 1 && Math.abs(edge.arrowTip.y - 30) < 1, `arrowTip ${JSON.stringify(edge.arrowTip)}`)
+  // 起点在 a 右边缘 (100) 之外 END_GAP；终点在 b 左边缘 (300) 之外 END_GAP
+  assert.ok(Math.abs(edge.points[0].x - (100 + END_GAP)) < 0.5, `起点 x=${edge.points[0].x}`)
+  assert.ok(Math.abs(edge.points[0].y - 30) < 0.5, `起点 y=${edge.points[0].y}`)
+  assert.ok(Math.abs(edge.points[1].x - (300 - END_GAP)) < 0.5, `终点 x=${edge.points[1].x}`)
+  // 箭头尖端与线端重合，同样离边框 END_GAP（不贴边）
+  assert.ok(
+    Math.abs(edge.arrowTip.x - (300 - END_GAP)) < 0.5 && Math.abs(edge.arrowTip.y - 30) < 0.5,
+    `arrowTip ${JSON.stringify(edge.arrowTip)}`,
+  )
 })
 
 test('anchorPoint 四边中心 + 错开（在外侧 ARROW_GAP）', () => {
@@ -301,25 +303,39 @@ test('正交避障：连线绕开中间节点', () => {
 })
 
 test('routeEdgeBundle: 同一节点出口锚点按槽位扇开（间距 EDGE_SPACING）', () => {
+  // 分层图（direction=TB）下，a 的两个子节点都在下方 → 两条边都从 a 的【底边】出，
+  // 沿 x 方向按 EDGE_SPACING 扇开。这与 pickSide 的主方向优先规则一致。
   const nodes = new Map([
-    ['a', { key: 'a', shape: 'rectangle', x: 0, y: 0, width: 100, height: 60 }],
-    ['b', { key: 'b', shape: 'rectangle', x: 300, y: 0, width: 100, height: 60 }],
+    ['a', { key: 'a', shape: 'rectangle', x: 100, y: 0, width: 100, height: 60 }],
+    ['b', { key: 'b', shape: 'rectangle', x: 0, y: 200, width: 100, height: 60 }],
     ['c', { key: 'c', shape: 'rectangle', x: 300, y: 200, width: 100, height: 60 }],
   ])
   const bundle = routeEdgeBundle(nodes, [
     { from: 'a', to: 'b' },
     { from: 'a', to: 'c' },
   ])
-  // a 出发的两条边：a→b 与 a 中心对齐 → 中心槽位；a→c 非对齐 → 扇出槽位
   const starts = bundle.edges.map((e) => e.points[0])
   assert.ok(starts.length === 2)
-  const gap = Math.abs(starts[0].y - starts[1].y)
-  assert.equal(gap, 14, `同一节点出口锚点应按 EDGE_SPACING=14 扇开（实际 y 差 ${gap}）`)
-  assert.ok(Math.abs(starts[0].x - starts[1].x) < 1e-6, '出口 x 应一致（同侧）')
-  // 对齐边（a→b）应落在中心锚点，另一条围绕它偏移
-  const yByTo = Object.fromEntries(bundle.edges.map((e) => [e.to, e.points[0].y]))
-  assert.equal(yByTo.b, 30, '对齐边 a→b 走中心锚点 y=30')
-  assert.equal(yByTo.c, 44, '非对齐边 a→c 偏移 EDGE_SPACING（y=44）')
+  assert.ok(
+    bundle.edges.every((e) => e.fromSide === 'bottom'),
+    '分层图（TB）下两条边都从底边出',
+  )
+  const gap = Math.abs(starts[0].x - starts[1].x)
+  assert.equal(gap, 14, `同一节点出口锚点应按 EDGE_SPACING=14 扇开（实际 x 差 ${gap}）`)
+  assert.ok(Math.abs(starts[0].y - starts[1].y) < 1e-6, '出口 y 应一致（同侧）')
+})
+
+test('pickSide: 分层图优先主方向，避免斜穿整图', () => {
+  // ER 图实测缺陷：右上→左下时 dx 略大于 dy，旧实现会选「左/右」水平桩点，
+  // 连线于是斜穿整张图并压过中间实体。分层方向下应优先走垂直的底/顶边。
+  const from = { x: 430, y: 93 }
+  const to = { x: 150, y: 249 } // dx=-280, dy=+156（|dx| > |dy|）
+  assert.equal(pickSide(from, to, 'TB'), 'bottom', 'TB 布局优先底边出线')
+  assert.equal(pickSide(to, from, 'TB'), 'top', '反向优先顶边入线')
+  // LR 布局则优先左右
+  assert.equal(pickSide({ x: 0, y: 0 }, { x: 300, y: 40 }, 'LR'), 'right')
+  // 近同行（垂直位移极小）时退回较大位移判断
+  assert.equal(pickSide({ x: 0, y: 0 }, { x: 200, y: 2 }, 'TB'), 'right')
 })
 
 test('routeEdgeBundle: 平行边同槽位时升级 bezier，槽位错开后直线', () => {
@@ -554,8 +570,11 @@ test('routeEdge 暴露 fromTip/fromAngle（ER 起点端标记用）', () => {
   const edge = routeEdge(from, to, { type: 'straight' })
   assert.ok(edge.fromTip, '应有 fromTip')
   assert.ok(Number.isFinite(edge.fromAngle), '应有 fromAngle')
-  // 起点在右边缘 x=100，fromTip 应在边线上
-  assert.ok(Math.abs(edge.fromTip.x - 100) < 1, `fromTip.x=${edge.fromTip.x} 应在 from 节点右边缘`)
+  // 起点在右边缘 x=100 之外 END_GAP（ER 端标记跟线端走，同样不贴边框）
+  assert.ok(
+    Math.abs(edge.fromTip.x - (100 + END_GAP)) < 0.5,
+    `fromTip.x=${edge.fromTip.x} 应在 from 节点右边缘外 ${END_GAP}px`,
+  )
 })
 
 test('ER 图：显式 height 过小时按字段列表高度上修，避免溢出重叠', () => {
@@ -594,7 +613,7 @@ test('ER 图：实体与关系都产出坐标', () => {
 
 // ---------- architecture ----------
 
-test('架构图：对齐连线用直线，非对齐强制 ≥3 段正交路由', () => {
+test('架构图：相邻层网格错开，避免上下层连线共用垂直线段', () => {
   const arch = planArchitectureDiagram(
     [
       {
@@ -611,29 +630,26 @@ test('架构图：对齐连线用直线，非对齐强制 ≥3 段正交路由',
       { from: 'b', to: 'c' }, // 错位（右上→左下）→ ≥3 段
     ],
   )
-  const byKey = (from, to) => arch.links.find((l) => l.from === from && l.to === to)
+  // 相邻层模块数相同时，网格必须错开半个 moduleGap，否则上下层模块 x 完全重合，
+  // 上层的出线与下层的入线会共用同一条垂直线段（实测重叠 172px）。
+  const modX = (layerKey) =>
+    Object.values(arch.layers[layerKey].modules)
+      .map((m) => m.x)
+      .sort((a, b) => a - b)
+  const topX = modX('top')
+  const bottomX = modX('bottom')
+  const dx = Math.abs(bottomX[0] - topX[0])
+  assert.ok(dx > 1, `相邻层模块 x 不应完全对齐（实际偏移 ${dx}px）`)
 
-  // a→c 同列（x 相同）→ 2 点直线
-  const ac = byKey('a', 'c')
-  assert.equal(ac.points.length, 2, '同列连线应为直线（2 点）')
-  assert.ok(Math.abs(ac.points[0].x - ac.points[1].x) < 1e-6, '同列连线垂直')
-
-  // b→c 错位 → ≥4 点（≥3 段）正交
-  const bc = byKey('b', 'c')
-  assert.ok(bc.points.length >= 4, `错位连线应 ≥3 段（实际 ${bc.points.length - 1} 段）`)
-  // 每段水平或垂直
-  for (let i = 0; i < bc.points.length - 1; i++) {
-    const p1 = bc.points[i]
-    const p2 = bc.points[i + 1]
-    const horiz = Math.abs(p1.y - p2.y) < 1e-6
-    const vert = Math.abs(p1.x - p2.x) < 1e-6
-    assert.ok(horiz || vert, `错位连线第 ${i} 段非正交`)
-  }
-
-  // 架构图不允许 L 型（2 段）——非对齐连线必须 ≥3 段，避免贴节点边线
+  // 所有连线仍然是正交折线（每段水平或垂直）
   for (const link of arch.links) {
-    const n = link.points.length
-    assert.ok(n === 2 || n >= 4, `架构图连线 ${link.from}->${link.to} 段数异常：${n - 1} 段（应为直线或 ≥3 段）`)
+    for (let i = 0; i < link.points.length - 1; i++) {
+      const p1 = link.points[i]
+      const p2 = link.points[i + 1]
+      const horiz = Math.abs(p1.y - p2.y) < 1e-6
+      const vert = Math.abs(p1.x - p2.x) < 1e-6
+      assert.ok(horiz || vert, `${link.from}->${link.to} 第 ${i} 段非正交`)
+    }
   }
 })
 
@@ -650,4 +666,186 @@ test('箭头衔接：所有连线类型 path 终点与箭头尖端重合', () =>
       `${type}：path 终点 (${end}) 应等于箭头尖端 (${edge.arrowTip.x},${edge.arrowTip.y})`,
     )
   }
+})
+
+// ---------------------------------------------------------------------------
+// 布局质量量化回归：这些断言锁定「间距语义 / 画布利用率 / 连线不穿节点」，
+// 防止未来改动再次引入间距被放大、画布过大、连线斜穿等退化。
+// ---------------------------------------------------------------------------
+
+test('布局间距：columnGap / rowGap 就是真实像素间隙', async () => {
+  const nodes = [
+    { key: 'a', width: 200, height: 72 },
+    { key: 'b', width: 200, height: 72 },
+    { key: 'c', width: 200, height: 72 },
+    { key: 'd', width: 200, height: 72 },
+  ]
+  // a 分出 b/c 再汇到 d：b、c 同层，a/b 相邻层
+  const edges = [
+    { from: 'a', to: 'b' },
+    { from: 'a', to: 'c' },
+    { from: 'b', to: 'd' },
+    { from: 'c', to: 'd' },
+  ]
+  for (const [columnGap, rowGap] of [[60, 70], [40, 30], [120, 100]]) {
+    const r = await computeLayout(nodes, edges, { kind: 'layered', columnGap, rowGap, padding: 0 })
+    const { b, c, a, d } = r.nodes
+    const sameLayerGap = Math.round(c.x - (b.x + b.width))
+    assert.equal(sameLayerGap, columnGap, `同层间隙应等于 columnGap=${columnGap}（实际 ${sameLayerGap}）`)
+    // a 与 b 跨 1 层，中间夹着 b 的高度：视觉间隙 = d.y - (a.y + a.height) - b.height
+    const layerGap = Math.round(a.y + a.height + rowGap)
+    assert.ok(
+      Math.abs(b.y - layerGap) <= 1,
+      `层间距应等于 rowGap=${rowGap}（a 底 ${a.y + a.height} + ${rowGap}，b 顶 ${b.y}）`,
+    )
+    void d
+  }
+})
+
+test('网格布局：grid 的 columnGap / rowGap 生效（原生 GridLayout 不读该选项）', async () => {
+  const nodes = Array.from({ length: 6 }, (_, i) => ({ key: `n${i}`, width: 160, height: 72 }))
+  for (const [columnGap, rowGap] of [[60, 70], [200, 150], [10, 10]]) {
+    const r = await computeLayout(nodes, [], { kind: 'grid', columnGap, rowGap, padding: 0 })
+    const a = r.nodes.n0
+    const b = r.nodes.n1
+    const c = r.nodes.n3
+    assert.equal(Math.round(b.x - (a.x + a.width)), columnGap, `网格水平间隙应等于 columnGap=${columnGap}`)
+    assert.equal(Math.round(c.y - (a.y + a.height)), rowGap, `网格垂直间隙应等于 rowGap=${rowGap}`)
+  }
+})
+
+test('重新规划为经审核的布局：画布贴合内容，无大面积空白', async () => {
+  const { planErDiagram: planEr } = await import('../dist/core/er.js')
+  const er = planEr(
+    [
+      { key: 'a', label: '表A', fields: [{ name: 'id' }] },
+      { key: 'b', label: '表B', fields: [{ name: 'id' }] },
+    ],
+    [{ from: 'a', to: 'b' }],
+  )
+  // 画布尺寸应紧贴内容：不超过内容外接盒 + 2×padding 的一倍半
+  const pad = 60
+  const maxAllowedW = (er.width - pad) * 2 + pad * 2
+  const maxAllowedH = (er.height - pad) * 2 + pad * 2
+  assert.ok(er.width <= maxAllowedW, `ER 画布宽 ${er.width} 不应超过内容两倍（${maxAllowedW}）`)
+  assert.ok(er.height <= maxAllowedH, `ER 画布高 ${er.height} 不应超过内容两倍（${maxAllowedH}）`)
+})
+
+test('连线不穿越非端点节点（含回边外侧走廊）', async () => {
+  const { planDiagram } = await import('../dist/core/plan.js')
+  const { routeEdgeBundle } = await import('../dist/core/edge-bundle.js')
+  const nodes = [
+    { name: 'A' },
+    { name: 'B' },
+    { name: 'C' },
+    { name: 'D' },
+  ]
+  const edges = [
+    { source: 'A', target: 'B' },
+    { source: 'B', target: 'C' },
+    { source: 'C', target: 'D' },
+    { source: 'D', target: 'A' }, // 回边
+  ]
+  const { plan } = await planDiagram(nodes, edges, { kind: 'layered' })
+  const nodeMap = new Map()
+  for (const [k, r] of Object.entries(plan.nodes)) {
+    nodeMap.set(k, { key: k, shape: plan.nodeTable[k].shape, ...r })
+  }
+  const backKeys = new Set((plan.backEdges ?? []).map((e) => `${e.from}->${e.to}`))
+  const bundle = routeEdgeBundle(
+    nodeMap,
+    plan.edges.map((e) => ({
+      from: e.from,
+      to: e.to,
+      type: 'orthogonal',
+      backedge: backKeys.has(`${e.from}->${e.to}`),
+      direction: plan.direction,
+    })),
+  )
+
+  const segHitsRect = (p, q, r) => {
+    const pad = 2
+    return (
+      Math.min(p.x, q.x) < r.x + r.width - pad &&
+      Math.max(p.x, q.x) > r.x + pad &&
+      Math.min(p.y, q.y) < r.y + r.height - pad &&
+      Math.max(p.y, q.y) > r.y + pad
+    )
+  }
+  for (const e of bundle.edges) {
+    for (let i = 0; i < e.points.length - 1; i++) {
+      for (const n of nodeMap.values()) {
+        if (n.key === e.from || n.key === e.to) continue
+        assert.ok(
+          !segHitsRect(e.points[i], e.points[i + 1], n),
+          `边 ${e.from}->${e.to} 第 ${i} 段穿过了节点 ${n.key}`,
+        )
+      }
+    }
+  }
+
+  // 回边必须走外侧走廊：x 应超出所有节点包围盒
+  const minX = Math.min(...[...nodeMap.values()].map((n) => n.x))
+  const maxX = Math.max(...[...nodeMap.values()].map((n) => n.x + n.width))
+  for (const e of bundle.edges) {
+    if (!backKeys.has(`${e.from}->${e.to}`)) continue
+    const hasOutside = e.points.some((p) => p.x < minX || p.x > maxX)
+    assert.ok(hasOutside, `回边 ${e.from}->${e.to} 应走到节点包围盒外侧的走廊`)
+  }
+})
+
+// ---------------------------------------------------------------------------
+// 架构图连线类型：曲线必须只在层框空隙内弯曲，不能穿过或贴住层框边框。
+// ---------------------------------------------------------------------------
+
+test('架构图：bezier / arc 曲线不越出层框间隙', () => {
+  const layers = [
+    { key: 'top', label: '上层', modules: [{ key: 'a', label: 'A' }, { key: 'b', label: 'B' }] },
+    { key: 'bottom', label: '下层', modules: [{ key: 'c', label: 'C' }, { key: 'd', label: 'D' }] },
+  ]
+  for (const linkType of ['bezier', 'smooth', 'arc']) {
+    const arch = planArchitectureDiagram(
+      layers,
+      [
+        { from: 'a', to: 'c' }, // 近似同列
+        { from: 'b', to: 'c' }, // 明显横向位移
+        { from: 'a', to: 'd' },
+      ],
+      { linkType },
+    )
+    const topBottom = arch.layers.top.y + arch.layers.top.height
+    const bottomTop = arch.layers.bottom.y
+    const gapLo = topBottom
+    const gapHi = bottomTop
+    assert.ok(gapHi > gapLo, '层框之间应有空隙')
+
+    for (const link of arch.links) {
+      assert.equal(link.type, linkType, `连线类型应为 ${linkType}`)
+      // 首末点在模块上（必然位于层框内部，这是正确的出入线）；
+      // 中间路由点必须落在层框之间的空隙里，否则曲线会拱进层框。
+      const inner = link.points.slice(1, -1)
+      for (const p of inner) {
+        assert.ok(
+          p.y >= gapLo - 0.5 && p.y <= gapHi + 0.5,
+          `${linkType} ${link.from}->${link.to} 的中间点 y=${p.y} 越出层框间隙（${gapLo}~${gapHi}）`,
+        )
+      }
+    }
+  }
+})
+
+test('架构图：linkType 可通过 ArchOptions 设为默认连线类型', () => {
+  const layers = [
+    { key: 'top', label: '上', modules: [{ key: 'a', label: 'A' }] },
+    { key: 'bottom', label: '下', modules: [{ key: 'b', label: 'B' }] },
+  ]
+  const a1 = planArchitectureDiagram(layers, [{ from: 'a', to: 'b' }])
+  assert.equal(a1.links[0].type, 'orthogonal', '默认应为 orthogonal')
+
+  const a2 = planArchitectureDiagram(layers, [{ from: 'a', to: 'b' }], { linkType: 'bezier' })
+  assert.equal(a2.links[0].type, 'bezier', 'linkType 应生效')
+
+  // 单条 link 的显式 type 优先于全局默认
+  const a3 = planArchitectureDiagram(layers, [{ from: 'a', to: 'b', type: 'arc' }], { linkType: 'bezier' })
+  assert.equal(a3.links[0].type, 'arc', '单条 type 应优先')
 })

@@ -24,7 +24,7 @@ import type {
 } from '../core/plan.js'
 import { planSequenceDiagram, type SeqParticipant, type SeqMessage } from '../core/sequence.js'
 import { planErDiagram, type ErEntity, type ErRelation } from '../core/er.js'
-import { planArchitectureDiagram, type ArchLayer, type ArchLink } from '../core/arch.js'
+import { planArchitectureDiagram, type ArchLayer, type ArchLink, type ArchOptions } from '../core/arch.js'
 import { safeText, textWidth } from './validators.js'
 import { makeId } from './element-tools.js'
 
@@ -322,6 +322,10 @@ function drawFlowEdges(
           dashed: edge.dashed,
           label: edge.label,
           arrow: edge.arrow,
+          // 透传布局期语义：渲染层会重新路由一次，必须知道哪些边是回边，
+          // 否则会退回「内部正交通道」而斜穿主链。
+          backedge: backKeys.has(`${edge.from}->${edge.to}`),
+          direction: plan.direction,
         },
       }),
     )
@@ -451,16 +455,19 @@ export function drawSequenceScene(
         data: { points: pts as [number, number][] },
       }),
     )
+    // 消息标签位于箭头上方。文字的渲染基线是 y + fontSize*0.8（13px → +10.4），
+    // 因此 y 需要比箭头再高出「字高 + 间距」，否则文字底部会压在线上。
     const labelX = row.self ? row.x1 + 14 : (row.x1 + row.x2) / 2
+    const FONT = 13
     scene.elements.push(
       createElement('text', {
         id: makeId('msglabel'),
         x: labelX,
-        y: row.y - 18,
+        y: row.y - FONT * 0.8 - 8 - 2,
         width: 200,
         height: 18,
         stroke_color: '#495057',
-        data: { text: safeText(row.label), font_size: 13, text_align: row.self ? 'left' : 'center' },
+        data: { text: safeText(row.label), font_size: FONT, text_align: row.self ? 'left' : 'center' },
       }),
     )
   }
@@ -611,34 +618,9 @@ export function drawErScene(
         },
       }),
     )
-    const fr = er.entities[rel.from]
-    const tr = er.entities[rel.to]
-    if (rel.fromCard && fr && tr) {
-      scene.elements.push(
-        createElement('text', {
-          id: makeId('er_card_from'),
-          x: (fr.x + tr.x) / 2 - 20,
-          y: (fr.y + tr.y) / 2 - 10,
-          width: 60,
-          height: 20,
-          stroke_color: '#495057',
-          data: { text: safeText(rel.fromCard), font_size: 13, text_align: 'center' },
-        }),
-      )
-    }
-    if (rel.toCard && fr && tr) {
-      scene.elements.push(
-        createElement('text', {
-          id: makeId('er_card_to'),
-          x: (fr.x + tr.x) / 2 + 30,
-          y: (fr.y + tr.y) / 2 + 5,
-          width: 60,
-          height: 20,
-          stroke_color: '#495057',
-          data: { text: safeText(rel.toCard), font_size: 13, text_align: 'center' },
-        }),
-      )
-    }
+    // 基数标注（1 / N / M）由【渲染层】在真实路由结果上绘制（见 render.ts 的
+    // erEndMarker）—— 这里不预先算坐标：布局坐标在 centerScene 平移后会失真，
+    // 而渲染层拿到的 routed 已经包含最终位置与实际走线方向。
   }
 }
 
@@ -661,9 +643,10 @@ export function drawArchScene(
   layers: ArchLayer[],
   links: ArchLink[],
   style: DrawStyle = {},
+  archOptions: ArchOptions = {},
 ): ArchSceneResult {
   const s = styleOf(style)
-  const arch = planArchitectureDiagram(layers, links)
+  const arch = planArchitectureDiagram(layers, links, archOptions)
   const moduleIds: Record<string, string> = {}
   const layerRects: ArchSceneResult['layerRects'] = {}
   const moduleRects: ArchSceneResult['moduleRects'] = {}
@@ -728,6 +711,17 @@ export function drawArchScene(
     }
   }
 
+  // 模块 → 所属层框。渲染层据此做层感知路由：跨层连线先垂直穿出源层框、
+  // 在框间空隙水平位移、再垂直进入目标层框，不会横穿层框内部。
+  const moduleLayerRect: Record<string, { x: number; y: number; width: number; height: number }> = {}
+  for (const l of layers) {
+    const lr = layerRects[l.key]
+    if (!lr) continue
+    for (const m of l.modules) {
+      if (moduleRects[m.key]) moduleLayerRect[m.key] = lr
+    }
+  }
+
   for (const link of arch.links) {
     const fromId = moduleIds[link.from]
     const toId = moduleIds[link.to]
@@ -748,6 +742,10 @@ export function drawArchScene(
           dashed: link.dashed === false ? false : true,
           label: link.label,
           arrow: 'triangle',
+          fromLayer: moduleLayerRect[link.from],
+          toLayer: moduleLayerRect[link.to],
+          // 全部层框：跨多层连线需要知道中间隔着哪些层
+          allLayers: Object.values(layerRects),
         },
       }),
     )

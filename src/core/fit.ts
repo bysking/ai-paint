@@ -11,13 +11,18 @@ import type { Scene, SceneElement } from './scene.js'
 export interface FitOptions {
   /** 内容四周留白。默认 60。 */
   padding?: number
-  /** 最小画布宽。默认 2400。 */
+  /** 最小画布宽。默认 320（仅为极端小图兜底，不再强制撑到大画布）。 */
   minWidth?: number
-  /** 最小画布高。默认 1600。 */
+  /** 最小画布高。默认 240。 */
   minHeight?: number
 }
 
-/** 元素内容外接盒（不含画布背景 rect）。 */
+/** 元素内容外接盒（不含画布背景 rect）。
+ *
+ * 注意：连线（edge/arrow/line/draw）的实际路径存在 `data.points`，其坐标常常
+ * 超出元素自身 x/y/width/height 的包围盒（回边绕行、贝塞尔控制点外扩）。
+ * 只统计元素矩形会把画布算小，导致连线被裁掉 —— 这里把 path 点也纳入。
+ */
 export function contentBounds(scene: Scene): { minX: number; minY: number; maxX: number; maxY: number } | null {
   let minX = Infinity
   let minY = Infinity
@@ -28,6 +33,21 @@ export function contentBounds(scene: Scene): { minX: number; minY: number; maxX:
     minY = Math.min(minY, el.y)
     maxX = Math.max(maxX, el.x + el.width)
     maxY = Math.max(maxY, el.y + el.height)
+    const pts = (el.data as { points?: unknown } | undefined)?.points
+    if (Array.isArray(pts)) {
+      for (const p of pts) {
+        if (Array.isArray(p) && p.length >= 2) {
+          const px = Number(p[0])
+          const py = Number(p[1])
+          if (Number.isFinite(px) && Number.isFinite(py)) {
+            minX = Math.min(minX, px)
+            minY = Math.min(minY, py)
+            maxX = Math.max(maxX, px)
+            maxY = Math.max(maxY, py)
+          }
+        }
+      }
+    }
   }
   if (!Number.isFinite(minX)) return null
   return { minX, minY, maxX, maxY }
@@ -42,14 +62,15 @@ export function fitSceneContent(
   opts: FitOptions = {},
 ): { width: number; height: number; dx: number; dy: number } {
   const padding = opts.padding ?? 60
-  const minWidth = opts.minWidth ?? 2400
-  const minHeight = opts.minHeight ?? 1600
+  const minWidth = opts.minWidth ?? 320
+  const minHeight = opts.minHeight ?? 240
   const bounds = contentBounds(scene)
   if (!bounds) return { width: minWidth, height: minHeight, dx: 0, dy: 0 }
 
   const cw = Math.max(bounds.maxX - bounds.minX, 0)
   const ch = Math.max(bounds.maxY - bounds.minY, 0)
-  // 画布 = 内容 + 留白，不足最小画布时用最小画布（保证大图起点）
+  // 画布 = 内容 + 留白。最小尺寸只用于兜底极端小图（例如只有一个节点），
+  // 不再强制放大到固定大画布 —— 那会让小图产生大量空白（实测 ER 图填充率仅 1.7%）。
   const width = Math.max(minWidth, cw + padding * 2)
   const height = Math.max(minHeight, ch + padding * 2)
 

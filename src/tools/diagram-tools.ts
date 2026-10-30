@@ -10,7 +10,7 @@
 import { planDiagram, type FinalPlan } from '../core/plan.js'
 import type { ShapeType } from '../core/shapes.js'
 import { SHAPE_TYPES } from '../core/shapes.js'
-import type { LayoutKind, LayoutOptions } from '../core/layout.js'
+import { DEF_COLUMN_GAP, DEF_ROW_GAP, type LayoutKind, type LayoutOptions } from '../core/layout.js'
 import { fitSceneContent } from '../core/fit.js'
 import type { SceneStore } from '../mcp/store.js'
 import type { ToolRegistry } from './registry.js'
@@ -55,8 +55,8 @@ function edgesToPlan(raw: unknown): unknown {
 function layoutOptsFromArgs(args: Record<string, unknown>): LayoutOptions & { kind?: LayoutKind; name?: string } {
   return {
     kind: (str(args.kind, 'layered') as LayoutKind) || 'layered',
-    columnGap: intNum(args.column_gap, 'column_gap', 10, 1000, 80),
-    rowGap: intNum(args.row_gap, 'row_gap', 10, 1000, 50),
+    columnGap: intNum(args.column_gap, 'column_gap', 10, 1000, DEF_COLUMN_GAP),
+    rowGap: intNum(args.row_gap, 'row_gap', 10, 1000, DEF_ROW_GAP),
     padding: intNum(args.padding, 'padding', 0, 2000, 60),
     orthogonal: bool(args.orthogonal, true),
     direction: str(args.direction, 'TB') === 'LR' ? 'LR' : 'TB',
@@ -81,8 +81,8 @@ export function registerDiagramTools(reg: ToolRegistry, store: SceneStore): void
           description: '[{ source, target, label?, type? (straight/orthogonal/bezier/smooth/arc), dashed? }] — 也兼容旧式 { from, to }',
         },
         kind: { type: 'string', enum: ['layered', 'tree', 'grid', 'circular'], description: '布局类型。默认 layered。' },
-        column_gap: { type: 'number', description: '列间距。默认 80。' },
-        row_gap: { type: 'number', description: '行间距。默认 50。' },
+        column_gap: { type: 'number', description: '同层节点之间的实际像素间隙。默认 60。' },
+        row_gap: { type: 'number', description: '相邻层之间的实际像素间隙。默认 70。' },
         padding: { type: 'number', description: '外边距。默认 60。' },
         orthogonal: { type: 'boolean', description: '正交走线。默认 true。' },
         direction: { type: 'string', enum: ['TB', 'LR'], description: '布局方向。默认 TB。' },

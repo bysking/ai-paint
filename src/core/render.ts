@@ -122,6 +122,20 @@ export function renderSceneSvg(scene: Scene, _opts: RenderOptions = {}): string 
   // 节点矩形（标签碰撞检测用）
   const nodeRects = [...nodeById.values()].map((n) => ({ x: n.x, y: n.y, width: n.width, height: n.height }))
 
+  // 层框（frame）：架构图的连线必须绕开它们，而不是从层框内部横穿。
+  // frame 元素本身不是 shape，不会进入 nodeById（不参与锚点选择），
+  // 但需要作为额外的路由障碍物传递给 bundle。
+  const frameNodes: ConnectorNode[] = scene.elements
+    .filter((el) => el.type === 'frame')
+    .map((el) => ({
+      key: el.id,
+      shape: 'rectangle' as ShapeType,
+      x: el.x,
+      y: el.y,
+      width: el.width,
+      height: el.height,
+    }))
+
   // 预路由所有 edge（含正交避障），收集标签初始位置。
   // 用 routeEdgeBundle 成组路由：同一节点同侧的边自动扇出错开、重合边升级
   // 正交/贝塞尔 —— 比逐条 routeEdge 更能避免平行边/重合边叠在同一条线上。
@@ -144,10 +158,33 @@ export function renderSceneSvg(scene: Scene, _opts: RenderOptions = {}): string 
           dashed: Boolean(d.dashed),
           label: typeof d.label === 'string' ? d.label : undefined,
           arrow,
+          // 保持布局期的回边语义与方向：回边必须走外侧走廊，否则会斜穿主链
+          backedge: d.backedge === true,
+          direction: d.direction === 'LR' ? ('LR' as const) : ('TB' as const),
+          // 架构图：模块所属层框，供层感知路由使用
+          fromLayer: d.fromLayer as { x: number; y: number; width: number; height: number } | undefined,
+          toLayer: d.toLayer as { x: number; y: number; width: number; height: number } | undefined,
+          allLayers: d.allLayers as { x: number; y: number; width: number; height: number }[] | undefined,
         }
       })
       .filter((x): x is NonNullable<typeof x> => x !== null),
-    { minBends: 0 },
+    {
+      minBends: 0,
+      // 层框避障：豁免端点所在的层框（否则连线出不了自己的层），
+      // 其余层框作为障碍物，连线绕开而不是横穿。
+      extraObstaclesFor: (fromKey, toKey) => {
+        if (frameNodes.length === 0) return []
+        const inside = (n: ConnectorNode | undefined, f: ConnectorNode) =>
+          !!n &&
+          n.x >= f.x &&
+          n.y >= f.y &&
+          n.x + n.width <= f.x + f.width &&
+          n.y + n.height <= f.y + f.height
+        const from = nodeById.get(fromKey)
+        const to = nodeById.get(toKey)
+        return frameNodes.filter((f) => !inside(from, f) && !inside(to, f))
+      },
+    },
   )
   // 注意：同一对节点可有多条边（平行边），bundle.edges 按请求顺序返回，
   // 与 edgeEls 一一对应 —— 用队列逐条消费，避免同 pair 多条边被合并。
@@ -256,8 +293,14 @@ function renderEdgeWithLabel(
   const d = el.data ?? {}
   const fromCard = typeof d.from_card === 'string' ? d.from_card : ''
   const toCard = typeof d.to_card === 'string' ? d.to_card : ''
-  if (fromCard) parts.push(erEndMarker(fromCard, routed.fromTip, routed.fromAngle, col, el.stroke_width))
-  if (toCard) parts.push(erEndMarker(toCard, routed.arrowTip, routed.arrowAngle, col, el.stroke_width))
+  if (fromCard) {
+    parts.push(erEndMarker(fromCard, routed.fromTip, routed.fromAngle, col, el.stroke_width))
+    parts.push(erCardText(fromCard, routed.fromTip, routed.fromAngle))
+  }
+  if (toCard) {
+    parts.push(erEndMarker(toCard, routed.arrowTip, routed.arrowAngle, col, el.stroke_width))
+    parts.push(erCardText(toCard, routed.arrowTip, routed.arrowAngle))
+  }
   let labelSvg = ''
   if (routed.label) {
     const lp = labelPlacements.get(el.id)
@@ -463,6 +506,9 @@ function renderText(el: TextElement): string {
     'text-anchor': anchor,
     x: num(tx),
     y: num(ty),
+    // SVG 默认会折叠连续空白，导致「字段名 + 两个空格 + 类型」渲染成 idbigint。
+    // 显式保留空白，字段名与类型才有间距。
+    'xml:space': 'preserve',
   }
   // 文字白描边：先画描边、后画填充（paint-order），保证粗描边不压坏字形
   const strokeColor = String(d.text_stroke_color ?? '').trim()
@@ -560,6 +606,30 @@ export function erEndMarker(card: string, tip: Point, ang: number, color: string
   // 默认：单杠（one）——垂直于连线、横在接触点外
   const bar = size * 0.35
   return Svg.line(px(0, -bar).x, px(0, -bar).y, px(0, bar).x, px(0, bar).y, stroke)
+}
+
+/**
+ * ER 基数文字（1 / N / M）——画在 crow's foot 符号【外侧】。
+ *
+ * 符号本身用几何表达基数，文字是给读者的冗余提示。两者都贴在同一端点上时
+ * 会互相遮挡（最典型的是 "1" 和 "N" 挤成 "1N"），所以文字沿连线方向再外推一段，
+ * 并根据端点是水平还是垂直入线，选择不同的偏移轴。
+ */
+function erCardText(card: string, tip: Point, ang: number): string {
+  const text = card.trim().toUpperCase()
+  // 只给有语义的单字符基数配文字；MANY/ONE 这类长写法交给符号本身
+  if (text.length > 2) return ''
+  const along = { x: Math.cos(ang), y: Math.sin(ang) }
+  const perp = { x: -Math.sin(ang), y: Math.cos(ang) }
+  const OUT = 22 // 沿连线方向外推，越过 crow's foot 符号
+  const x = tip.x + along.x * OUT + perp.x * 10
+  const y = tip.y + along.y * OUT + perp.y * 10
+  return Svg.text(x, y, text, {
+    'font-size': '12px',
+    fill: '#495057',
+    'text-anchor': 'middle',
+    'font-family': "'Virgil','Segoe Print','Comic Sans MS','Comic Sans',cursive",
+  })
 }
 
 function renderEdge(el: EdgeElement, nodeById: Map<string, ConnectorNode>): string {

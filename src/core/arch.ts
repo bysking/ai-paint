@@ -69,12 +69,21 @@ export interface ArchOptions {
   headerHeight?: number
   moduleWidth?: number
   moduleHeight?: number
+  /**
+   * 默认连线类型（未在单条 link 上指定 type 时使用）。
+   * 支持 orthogonal / bezier / smooth / arc / straight —— 曲线只会在层框之间的
+   * 空隙里弯曲，不会穿过或贴着层框边框。
+   */
+  linkType?: EdgeType
 }
 
 const DEF: Required<ArchOptions> = {
   padding: 60,
-  layerGap: 70,
+  // 层间距需要容纳「跨层连线的水平转向段」：连线要在两层框之间的通道里拐弯，
+  // 通道太窄会导致正交路由找不到位置、退回贴边或斜穿。96 是实测的舒适值。
+  layerGap: 96,
   moduleGap: 24,
+  linkType: 'orthogonal' as EdgeType,
   headerHeight: 40,
   moduleWidth: 170,
   moduleHeight: 56,
@@ -94,7 +103,7 @@ export function planArchitectureDiagram(
   links: ArchLink[],
   opts: ArchOptions = {},
 ): ArchDiagram {
-  const { padding, layerGap, moduleGap, headerHeight, moduleWidth, moduleHeight } = { ...DEF, ...opts }
+  const { padding, layerGap, moduleGap, headerHeight, moduleWidth, moduleHeight, linkType } = { ...DEF, ...opts }
 
   // ---- 1. 每层内部布局 ----
   const layerRects = new Map<string, { x: number; y: number; width: number; height: number }>()
@@ -109,8 +118,19 @@ export function planArchitectureDiagram(
       : 0,
   )
   const maxContentW = Math.max(...contentWList, 0)
-  // 层宽统一 = 最宽内容 + 内边距（各层左右对齐居中到画布）
-  const layerW = Math.max(maxContentW + moduleGap * 2, 160)
+
+  // 层框内边距（独立于 moduleGap）：
+  //   H = 模块与层框左右边；V = 模块与层框上下边。
+  // 垂直内边距要比水平小，否则层框显得臃肿；但又要容纳「出线 + END_GAP」。
+  const modulePadH = 40
+  const modulePadV = 28
+
+  // 层框宽度按【各自内容】决定，而不是所有层统一取最宽层。
+  // 统一宽度会让模块少的层出现大片空白（5 模块层和 3 模块层同宽时，
+  // 后者两侧各有 170px+ 的空区），整张图看起来松散。
+  // 各层按画布中线居中，视觉上仍然是整齐的分层结构。
+  const canvasContentW = maxContentW
+  const layerWidths = contentWList.map((w) => Math.max(w + modulePadH * 2, 200))
 
   let totalH = 0
   let y = padding
@@ -118,20 +138,28 @@ export function planArchitectureDiagram(
     const layer = layers[li]
     const mods = layer.modules
     const contentW = contentWList[li]
-    const layerH = headerHeight + moduleHeight + moduleGap * 2
+    const layerW = layerWidths[li]
+    // 层框高度 = 标题栏 + 模块高 + 模块上下内边距（垂直内边距独立于水平 moduleGap）
+    const layerH = headerHeight + moduleHeight + modulePadV * 2
 
-    // 层内模块排布：水平居中（同一水平线上）
-    const startX = padding + (layerW - contentW) / 2
+    // 层框在画布上居中；模块在该层框内居中
+    const layerX = padding + (canvasContentW + modulePadH * 2 - layerW) / 2
+    // 相邻层模块数相同时，网格会完全对齐 —— 上一层的 x 中心正好落在下一层的
+    // x 中心上，导致「上一层的出线」与「下一层的入线」共用同一条垂直线段而重叠
+    // （实测 中间件层 与 数据层 完全重合，重叠 172px）。
+    // 给奇数层叠加半个模块间距的错位，让相邻层的网格自然交错。
+    const stagger = li % 2 === 1 ? moduleGap / 2 : 0
+    const startX = layerX + (layerW - contentW) / 2 + stagger
     let mx = startX
     for (const m of mods) {
-      moduleRects.set(m.key, { x: mx, y: y + headerHeight + moduleGap, width: moduleWidth, height: moduleHeight })
+      moduleRects.set(m.key, { x: mx, y: y + headerHeight + modulePadV, width: moduleWidth, height: moduleHeight })
       moduleFill.set(m.key, m.fill ?? layer.fill ?? '#ffffff')
       moduleLayer.set(m.key, layer.key)
       mx += moduleWidth + moduleGap
     }
 
     layerRects.set(layer.key, {
-      x: padding,
+      x: layerX,
       y,
       width: layerW,
       height: layerH,
@@ -140,8 +168,8 @@ export function planArchitectureDiagram(
     totalH = y - layerGap
   }
 
-  // 画布宽度 = 统一层宽
-  const width = layerW + padding * 2
+  // 画布宽度 = 最宽层 + 两侧留白
+  const width = canvasContentW + modulePadH * 2 + padding * 2
   const height = totalH + padding
 
   // ---- 2. 跨层关系正交路由 ----
@@ -154,7 +182,7 @@ export function planArchitectureDiagram(
     links.map((l) => ({
       from: l.from,
       to: l.to,
-      type: l.type ?? 'orthogonal',
+      type: l.type ?? linkType,
       dashed: l.dashed ?? false,
       label: l.label,
       arrow: 'triangle',
@@ -164,7 +192,7 @@ export function planArchitectureDiagram(
   const routedMap = new Map(bundle.edges.map((e) => [`${e.from}->${e.to}`, e]))
 
   const outLinks = links.map((l) => {
-    const t = (l.type ?? 'orthogonal') as EdgeType
+    const t = (l.type ?? linkType) as EdgeType
     const routed = routedMap.get(`${l.from}->${l.to}`)
     return {
       from: l.from,

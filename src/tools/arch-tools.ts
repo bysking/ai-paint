@@ -9,6 +9,7 @@ import type { SceneStore } from '../mcp/store.js'
 import type { ToolRegistry } from './registry.js'
 import { bool, intNum, str } from './validators.js'
 import { drawArchScene } from './draw.js'
+import type { ArchOptions } from '../core/arch.js'
 import type { ArchLayer, ArchLink } from '../core/arch.js'
 
 export function registerArchTools(reg: ToolRegistry, store: SceneStore): void {
@@ -35,6 +36,12 @@ export function registerArchTools(reg: ToolRegistry, store: SceneStore): void {
         module_gap: { type: 'number', description: '层内模块间距。默认 24。' },
         module_width: { type: 'number', description: '子模块宽。默认 170。' },
         module_height: { type: 'number', description: '子模块高。默认 56。' },
+        link_type: {
+          type: 'string',
+          enum: ['orthogonal', 'bezier', 'smooth', 'arc', 'straight'],
+          description:
+            '默认连线类型（单条 link 的 type 优先）。曲线只在层框之间的空隙里弯曲，不会穿过或贴住层框边框。默认 orthogonal。',
+        },
         clear_existing: { type: 'boolean', description: '先清空场景。默认 false。' },
       },
       required: ['scene', 'layers', 'links'],
@@ -72,10 +79,22 @@ export function registerArchTools(reg: ToolRegistry, store: SceneStore): void {
       if (bool(args.clear_existing, false)) scene.elements = []
       scene.paper = true
 
-      const { moduleIds, layerRects, moduleRects, width, height } = drawArchScene(scene, layers, links, {
-        strokeWidth: 2,
-        roughness: 1,
-      })
+      const edgeTypes = ['straight', 'orthogonal', 'bezier', 'smooth', 'arc']
+      const lt = str(args.link_type)
+      const { moduleIds, layerRects, moduleRects, width, height } = drawArchScene(
+        scene,
+        layers,
+        links,
+        { strokeWidth: 2, roughness: 1 },
+        {
+          linkType: (edgeTypes.includes(lt) ? lt : 'orthogonal') as ArchOptions['linkType'],
+          layerGap: intNum(args.layer_gap, 'layer_gap', 20, 500, 96),
+          moduleGap: intNum(args.module_gap, 'module_gap', 0, 300, 24),
+          moduleWidth: intNum(args.module_width, 'module_width', 60, 600, 170),
+          moduleHeight: intNum(args.module_height, 'module_height', 30, 300, 56),
+          padding: intNum(args.padding, 'padding', 0, 500, 60),
+        },
+      )
 
       centerScene(scene, { padding: 60 })
       store.update(scene)
