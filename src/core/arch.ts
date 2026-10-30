@@ -82,8 +82,13 @@ const DEF: Required<ArchOptions> = {
   // 层间距需要容纳「跨层连线的水平转向段」：连线要在两层框之间的通道里拐弯，
   // 通道太窄会导致正交路由找不到位置、退回贴边或斜穿。96 是实测的舒适值。
   layerGap: 96,
-  moduleGap: 24,
-  linkType: 'orthogonal' as EdgeType,
+  // 同层模块间距。弧线/贝塞尔要在模块之间可见地弯曲，
+  // 间距过小（24px）时弧高只有几像素、看起来就是直线。
+  moduleGap: 44,
+  // 默认用贝塞尔曲线：控制点沿垂直方向拉开形成 S 形，
+  // 在多来源的跨层连线交叉处比单向圆弧更容易分辨来向，
+  // 也不会像正交路由那样在层间空隙里堆出一排平行折线。
+  linkType: 'bezier' as EdgeType,
   headerHeight: 40,
   moduleWidth: 170,
   moduleHeight: 56,

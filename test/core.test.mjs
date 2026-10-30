@@ -626,9 +626,10 @@ test('架构图：相邻层网格错开，避免上下层连线共用垂直线�
       },
     ],
     [
-      { from: 'a', to: 'c' }, // 同列 → 直线
-      { from: 'b', to: 'c' }, // 错位（右上→左下）→ ≥3 段
+      { from: 'a', to: 'c' },
+      { from: 'b', to: 'c' },
     ],
+    { linkType: 'orthogonal' },
   )
   // 相邻层模块数相同时，网格必须错开半个 moduleGap，否则上下层模块 x 完全重合，
   // 上层的出线与下层的入线会共用同一条垂直线段（实测重叠 172px）。
@@ -641,14 +642,16 @@ test('架构图：相邻层网格错开，避免上下层连线共用垂直线�
   const dx = Math.abs(bottomX[0] - topX[0])
   assert.ok(dx > 1, `相邻层模块 x 不应完全对齐（实际偏移 ${dx}px）`)
 
-  // 所有连线仍然是正交折线（每段水平或垂直）
+  // 路由点始终是正交折线（曲线在这些点之间绘制）
   for (const link of arch.links) {
     for (let i = 0; i < link.points.length - 1; i++) {
       const p1 = link.points[i]
       const p2 = link.points[i + 1]
       const horiz = Math.abs(p1.y - p2.y) < 1e-6
       const vert = Math.abs(p1.x - p2.x) < 1e-6
-      assert.ok(horiz || vert, `${link.from}->${link.to} 第 ${i} 段非正交`)
+      // 允许退化点（相邻点重合）
+      const same = horiz && vert
+      assert.ok(horiz || vert || same, `${link.from}->${link.to} 第 ${i} 段非正交`)
     }
   }
 })
@@ -840,10 +843,16 @@ test('架构图：linkType 可通过 ArchOptions 设为默认连线类型', () =
     { key: 'bottom', label: '下', modules: [{ key: 'b', label: 'B' }] },
   ]
   const a1 = planArchitectureDiagram(layers, [{ from: 'a', to: 'b' }])
-  assert.equal(a1.links[0].type, 'orthogonal', '默认应为 orthogonal')
+  assert.equal(a1.links[0].type, 'bezier', '默认应为 bezier（架构图默认贝塞尔曲线）')
 
   const a2 = planArchitectureDiagram(layers, [{ from: 'a', to: 'b' }], { linkType: 'bezier' })
   assert.equal(a2.links[0].type, 'bezier', 'linkType 应生效')
+
+  const a0 = planArchitectureDiagram(layers, [{ from: 'a', to: 'b' }], { linkType: 'orthogonal' })
+  assert.equal(a0.links[0].type, 'orthogonal', '可显式切回 orthogonal')
+
+  const aArc = planArchitectureDiagram(layers, [{ from: 'a', to: 'b' }], { linkType: 'arc' })
+  assert.equal(aArc.links[0].type, 'arc', '可显式切到 arc')
 
   // 单条 link 的显式 type 优先于全局默认
   const a3 = planArchitectureDiagram(layers, [{ from: 'a', to: 'b', type: 'arc' }], { linkType: 'bezier' })

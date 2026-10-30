@@ -730,20 +730,20 @@ function buildPathD(
     return `M ${fmtP(a)} C ${fmtP(c1)} ${fmtP(c2)} ${fmtP(b)}`
   }
   if (type === 'arc') {
-    const theta = Math.min(Math.PI * 0.9, Math.max(0.3, dist(a, b) / 60))
-    const r = dist(a, b) / (2 * Math.cos(theta / 2))
-    const mid = { x: (a.x + b.x) / 2, y: (a.y + b.y) / 2 }
-    const dVec = { x: b.x - a.x, y: b.y - a.y }
-    const len = dist(a, b) || 1
-    const n = { x: -dVec.y / len, y: dVec.x / len }
-    const h = Math.sqrt(Math.max(0, r * r - (len / 2) ** 2))
-    const center = { x: mid.x + n.x * h, y: mid.y + n.y * h }
-    const a1 = Math.atan2(a.y - center.y, a.x - center.x)
-    const a2 = Math.atan2(b.y - center.y, b.x - center.x)
-    let sweep = a2 - a1
-    while (sweep < 0) sweep += 2 * Math.PI
-    const largeArc = sweep > Math.PI ? 1 : 0
-    return `M ${fmtP(a)} A ${fmt(r)} ${fmt(r)} 0 ${largeArc} 1 ${fmtP(b)}`
+    const len = dist(a, b)
+    // 两点过近（同模块不同槽位出线、被 stub 裁剪后重合）时，圆弧退化：
+    // 半径趋近 0 会生成 SVG 非法的 `A 0 0 ...`，浏览器/渲染器直接画不出来。
+    // 直接退化成正交/直线。
+    if (len < 1) return `M ${fmtP(a)} L ${fmtP(b)}`
+
+    // 用【弧高】(sagitta) 反算半径：r = (h² + (chord/2)²) / (2h)。
+    // 关键是把弧高夹在小范围内 —— 若按「r = 弦长/2」取半径，连线就是一个半圆，
+    // 长连线会鼓成横跨整个画布的大拱。固定小弧高让长线自动变平缓。
+    const sagitta = Math.max(6, Math.min(28, len * 0.12))
+    const half = len / 2
+    const r = (sagitta * sagitta + half * half) / (2 * sagitta)
+    // 弧高远小于半弦长，扫角恒 < 180°，large-arc-flag 固定为 0
+    return `M ${fmtP(a)} A ${fmt(r)} ${fmt(r)} 0 0 1 ${fmtP(b)}`
   }
   // straight / orthogonal → polyline
   return `M ${pts.map((p) => `${fmt(p.x)} ${fmt(p.y)}`).join(' L ')}`
@@ -974,8 +974,13 @@ export function routeEdge(
 
         let midD: string
         if (curveType === 'arc') {
-          const len = Math.hypot(b.x - a.x, b.y - a.y) || 1
-          const r = Math.max(len / 2 + 1, len / 2 + bend * 0.4)
+          // 用弧高（sagitta）反算半径，而不是「弦长/2 + 常数」——
+          // 后者在长连线上会逼近半圆，画出一个横跨整个层框的大拱。
+          // 弧高固定为较小的值，长线自然变平缓。
+          const chord = Math.hypot(b.x - a.x, b.y - a.y) || 1
+          const sagitta = Math.max(10, Math.min(34, chord * 0.12))
+          const half = chord / 2
+          const r = (sagitta * sagitta + half * half) / (2 * sagitta)
           midD = `A ${fmt(r)} ${fmt(r)} 0 0 1 ${fmt(b.x)} ${fmt(b.y)}`
         } else {
           // 三次贝塞尔：控制点留在空隙内，形成平滑 S 形
@@ -1066,7 +1071,10 @@ export function routeEdge(
   // 目标端"垂直进入小段"：入边必须有一段与目标节点连接边垂直的小段，
   // 避免斜线/曲线以倾斜角度"切"进节点侧面。正交线末段本身已垂直目标边，无需处理。
   // stubPoint 落在节点外侧 stubLen 处，末段 stubPoint→toC 沿目标边法向（垂直于边）进入。
-  const stubLen = Math.max(4, Math.min(14, dist(fromC, toC) * 0.3))
+  // stubLen 不能超过起终点可用距离的一半 —— 否则 stubPoint 会跑到起点另一侧，
+  // 短连线（两个模块之间只有几十 px）会退化成零长度路径，曲线画不出来。
+  const span = dist(fromC, toC)
+  const stubLen = Math.max(0, Math.min(14, span * 0.3))
   const toN: Point =
     toSide === 'left' ? { x: 1, y: 0 }
     : toSide === 'right' ? { x: -1, y: 0 }
@@ -1094,11 +1102,18 @@ export function routeEdge(
   //   - straight/orthogonal → 折线直接拼
   //   - bezier/smooth/arc   → 曲线只画到 stubPoint，再追加一段直线 stubPoint→toC
   //                           （垂直进入目标节点，避免曲线倾斜切入）
-  const pathD =
-    effType === 'bezier' || effType === 'smooth' || effType === 'arc'
-      ? buildPathD(effType, dedupePath([fromC, ...points, stubPoint]), bendSign) +
-        ` L ${fmt(toC.x)} ${fmt(toC.y)}`
-      : buildPathD(effType, drawPoints, bendSign)
+  // 曲线段的起止点若重合（短连线、锚点被夹到同一处），曲线会退化成零长度，
+  // 此时直接走直线，避免生成 `A 0 0` / 全零控制点这类非法路径。
+  let pathD: string
+  if (effType === 'bezier' || effType === 'smooth' || effType === 'arc') {
+    const curvePts = dedupePath([fromC, ...points, stubPoint])
+    pathD =
+      dist(curvePts[0], curvePts[curvePts.length - 1]) < 1
+        ? buildPathD('straight', drawPoints, bendSign)
+        : buildPathD(effType, curvePts, bendSign) + ` L ${fmt(toC.x)} ${fmt(toC.y)}`
+  } else {
+    pathD = buildPathD(effType, drawPoints, bendSign)
+  }
 
   // 3) 箭头尖端 = 节点边线上的接触点（线端与箭头尖端重合）
   const arrowTip = toC
