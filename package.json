@@ -1,6 +1,6 @@
 {
   "name": "@bysking/ai-paint",
-  "version": "1.0.1",
+  "version": "1.0.2",
   "description": "Excalidraw风格的手绘画布绘图引擎MCP（TypeScript），封装为面向AI代理的MCP服务器",
   "type": "module",
   "author": "bysking@qq.com",

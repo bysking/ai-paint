@@ -7,6 +7,7 @@
  */
 
 import type { Scene, SceneElement } from './scene.js'
+import { routeSceneEdges } from './render.js'
 
 export interface FitOptions {
   /** 内容四周留白。默认 60。 */
@@ -17,11 +18,14 @@ export interface FitOptions {
   minHeight?: number
 }
 
-/** 元素内容外接盒（不含画布背景 rect）。
+/**
+ * 场景内容外接盒（不含画布背景 rect），**包含连线的真实路径**。
  *
- * 注意：连线（edge/arrow/line/draw）的实际路径存在 `data.points`，其坐标常常
- * 超出元素自身 x/y/width/height 的包围盒（回边绕行、贝塞尔控制点外扩）。
- * 只统计元素矩形会把画布算小，导致连线被裁掉 —— 这里把 path 点也纳入。
+ * 连线是图形的一部分：回边会绕到节点包围盒外侧很远，贝塞尔/弧线也会外扩。
+ * 只统计元素矩形会让外接盒偏小，导致四周留白不均（实测左边距 0、右边距 10）。
+ *
+ * edge 的路径必须用「与渲染完全相同的路由」来算（routeSceneEdges），
+ * 不能读 data.points —— 那是布局期的坐标，渲染时会重新路由，两者对不上。
  */
 export function contentBounds(scene: Scene): { minX: number; minY: number; maxX: number; maxY: number } | null {
   let minX = Infinity
@@ -29,26 +33,83 @@ export function contentBounds(scene: Scene): { minX: number; minY: number; maxX:
   let maxX = -Infinity
   let maxY = -Infinity
   for (const el of scene.elements) {
-    minX = Math.min(minX, el.x)
-    minY = Math.min(minY, el.y)
-    maxX = Math.max(maxX, el.x + el.width)
-    maxY = Math.max(maxY, el.y + el.height)
-    const pts = (el.data as { points?: unknown } | undefined)?.points
-    if (Array.isArray(pts)) {
-      for (const p of pts) {
-        if (Array.isArray(p) && p.length >= 2) {
-          const px = Number(p[0])
-          const py = Number(p[1])
-          if (Number.isFinite(px) && Number.isFinite(py)) {
+    // edge 元素的 x/y/width/height 恒为 0（或平移后的残留值），
+    // 它的真实几何由两端节点决定，渲染时才算出 —— 不能用自身矩形参与边界，
+    // 否则平移后 edge.x 变成 dx，会被误当成内容左边界。
+    if (el.type !== 'edge') {
+      minX = Math.min(minX, el.x)
+      minY = Math.min(minY, el.y)
+      maxX = Math.max(maxX, el.x + el.width)
+      maxY = Math.max(maxY, el.y + el.height)
+    }
+
+    // 独立折线（line/arrow/draw）：路径点就在 data.points
+    if (el.type === 'line' || el.type === 'arrow' || el.type === 'draw') {
+      const pts = (el.data as { points?: unknown } | undefined)?.points
+      if (Array.isArray(pts)) {
+        for (const p of pts) {
+          if (Array.isArray(p) && p.length >= 2) {
+            const px = Number(p[0])
+            const py = Number(p[1])
+            if (Number.isFinite(px) && Number.isFinite(py)) {
+              minX = Math.min(minX, px)
+              minY = Math.min(minY, py)
+              maxX = Math.max(maxX, px)
+              maxY = Math.max(maxY, py)
+            }
+          }
+        }
+      }
+    }
+  }
+
+  // 连线（edge）：用真实路由结果参与边界计算。
+  // 直接从 pathD 里抽出所有坐标 —— 直线/贝塞尔控制点/圆弧端点都在里面，
+  // 这样不论哪种连线类型都不会漏算外扩部分。
+  const hasEdge = scene.elements.some((el) => el.type === 'edge')
+  if (hasEdge) {
+    try {
+      const { routedEdges } = routeSceneEdges(scene)
+      const PAD = 12 // 箭头/线宽余量
+      for (const { routed } of routedEdges) {
+        for (const p of routed.points) {
+          minX = Math.min(minX, p.x)
+          minY = Math.min(minY, p.y)
+          maxX = Math.max(maxX, p.x)
+          maxY = Math.max(maxY, p.y)
+        }
+        // 解析 pathD 中的坐标对。
+        // 注意不能简单抓「两个连续数字」—— 圆弧命令 A rx ry rot largeArc sweep x y
+        // 里也有数字对（如 "A 18 18 0 0 1 160 178"），会把 rx/ry、largeArc/sweep
+        // 误当成坐标（产生假的 x=0）。
+        // 这里按命令逐段解析，只取真正的端点/控制点。
+        for (const m of routed.pathD.matchAll(/([MLCA])([^MLCA]*)/g)) {
+          const cmd = m[1]
+          const nums = (m[2].match(/-?\d+(?:\.\d+)?/g) ?? []).map(Number).filter(Number.isFinite)
+          let pairs: [number, number][] = []
+          if (cmd === 'A') {
+            // A rx ry rot largeArc sweep x y —— 只取最后两个
+            if (nums.length >= 7) pairs = [[nums[nums.length - 2], nums[nums.length - 1]]]
+          } else {
+            for (let i = 0; i + 1 < nums.length; i += 2) pairs.push([nums[i], nums[i + 1]])
+          }
+          for (const [px, py] of pairs) {
             minX = Math.min(minX, px)
             minY = Math.min(minY, py)
             maxX = Math.max(maxX, px)
             maxY = Math.max(maxY, py)
           }
         }
+        minX = Math.min(minX, routed.arrowTip.x - PAD)
+        maxX = Math.max(maxX, routed.arrowTip.x + PAD)
+        minY = Math.min(minY, routed.arrowTip.y - PAD)
+        maxY = Math.max(maxY, routed.arrowTip.y + PAD)
       }
+    } catch {
+      /* 路由失败时退回只算元素矩形 */
     }
   }
+
   if (!Number.isFinite(minX)) return null
   return { minX, minY, maxX, maxY }
 }

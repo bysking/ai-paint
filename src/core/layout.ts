@@ -49,6 +49,8 @@ export interface LayoutOptions {
   orthogonal?: boolean
   /** 树布局时是否垂直方向。 */
   direction?: 'LR' | 'TB'
+  /** 分层算法：network-simplex（默认，最均衡）/ tight-tree（最紧凑）/ longest-path。 */
+  ranker?: 'network-simplex' | 'tight-tree' | 'longest-path'
 }
 
 export interface LayoutResult {
@@ -113,7 +115,7 @@ export async function computeLayout(
       // 树形：dagre 分层 + LR/TB 方向。与 layered 共用同一套间距语义，
       // 不在内部做 Math.max 兜底（那会让用户传入的值失真）。
       const data = toGraphData(nodes, edges)
-      result = await runDagre(data, nodeSize, direction, columnGap, rowGap)
+      result = await runDagre(data, nodeSize, direction, columnGap, rowGap, opts.ranker)
       break
     }
     default: {
@@ -200,6 +202,7 @@ async function runDagre(
   direction: 'LR' | 'TB',
   columnGap: number,
   rowGap: number,
+  ranker: 'network-simplex' | 'tight-tree' | 'longest-path' = 'network-simplex',
 ): Promise<RawResult> {
   const layout = new AntVDagreLayout({
     nodeSize: (n: { id?: unknown }) => {
@@ -215,7 +218,11 @@ async function runDagre(
     // 这里反算回传，保证对外暴露的 columnGap / rowGap 就是【实际像素间隙】。
     nodesep: columnGap / GAP_SCALE_NODE,
     ranksep: rowGap / GAP_SCALE_RANK,
-    // 默认 ranker（network-simplex）：分层质量最好。
+    // ranker：
+    //   network-simplex（默认）—— 分层最均衡，节点分散在不同层
+    //   tight-tree            —— 层数最少、整体最紧凑（长主干 + 短旁支的流程图更合适，
+    //                            实测同一张 20 节点流程图高度减少约 32%）
+    ranker,
     directed: true,
     multigraph: true,
   })

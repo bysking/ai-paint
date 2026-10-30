@@ -1164,13 +1164,25 @@ export function edgeLabelAnchor(e: RoutedEdge): Point {
       const a = pts[0]
       const b = pts[1]
       const horiz = Math.abs(a.y - b.y) <= 0.5
+      const vert = Math.abs(a.x - b.x) <= 0.5
       // 放在首段的【前 60% 处】：既贴近分支起点，又不会顶到走廊竖线上。
-      // （回边的首段是伸向走廊的短横，取中点会落在走廊附近。）
       const t = 0.6
       const x = a.x + (b.x - a.x) * t
       const y = a.y + (b.y - a.y) * t
-      // 水平段 → 标签在线之上；垂直段 → 在线的右侧
-      return horiz ? { x, y: y - LABEL_OFFSET } : { x: x + LABEL_OFFSET, y }
+      if (horiz) return { x, y: y - LABEL_OFFSET }
+      if (vert) return { x: x + LABEL_OFFSET, y }
+      // 斜线段（菱形分支出线常常是斜的）：沿线段法向偏移，否则标签会压在线上。
+      // 偏移量要足够大 —— 13px 字体的半高约 6.5px，加上文字基线偏移，
+      // 法向距离需 ≥ 14px 才能让文字整体离开线条。
+      const dx = b.x - a.x
+      const dy = b.y - a.y
+      const len = Math.hypot(dx, dy) || 1
+      // 法向取「指向外侧」的一侧：右分支向右上、左分支向左上
+      const nx = dy / len
+      const ny = -dx / len
+      const sign = nx >= 0 ? 1 : -1
+      const off = LABEL_OFFSET + 8
+      return { x: x + nx * sign * off, y: y + ny * sign * off }
     }
   }
   if (e.type !== 'orthogonal' || e.points.length < 3) {

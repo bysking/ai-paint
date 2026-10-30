@@ -103,13 +103,14 @@ export interface RenderOptions {
   embedBackground?: boolean
 }
 
-export function renderSceneSvg(scene: Scene, _opts: RenderOptions = {}): string {
-  const usePaper = scene.paper !== false
-  const bg = usePaper ? '#faf9f4' : scene.background_color || '#ffffff'
-  const defs = usePaper
-    ? `<radialGradient id="vg" cx="50%" cy="42%" r="80%"><stop offset="0%" stop-color="rgba(0,0,0,0)"/><stop offset="100%" stop-color="rgba(120,110,80,0.10)"/></radialGradient>`
-    : ''
-
+/**
+ * 预路由场景中的所有连线（渲染与边界计算共用）。
+ *
+ * 抽取出来的原因：contentBounds 需要知道「边的真实路径走到哪」才能正确居中，
+ * 而边的路径只有在路由之后才知道（回边会走到节点包围盒外侧很远）。
+ * 若用两套逻辑，居中结果和实际渲染就会对不上。
+ */
+export function routeSceneEdges(scene: Scene) {
   // 预解析 edge 节点引用（edge 元素需要整个场景上下文来路由）
   const nodeById = new Map<string, ConnectorNode>()
   for (const el of scene.elements) {
@@ -119,12 +120,7 @@ export function renderSceneSvg(scene: Scene, _opts: RenderOptions = {}): string 
     }
   }
 
-  // 节点矩形（标签碰撞检测用）
-  const nodeRects = [...nodeById.values()].map((n) => ({ x: n.x, y: n.y, width: n.width, height: n.height }))
-
   // 层框（frame）：架构图的连线必须绕开它们，而不是从层框内部横穿。
-  // frame 元素本身不是 shape，不会进入 nodeById（不参与锚点选择），
-  // 但需要作为额外的路由障碍物传递给 bundle。
   const frameNodes: ConnectorNode[] = scene.elements
     .filter((el) => el.type === 'frame')
     .map((el) => ({
@@ -136,9 +132,9 @@ export function renderSceneSvg(scene: Scene, _opts: RenderOptions = {}): string 
       height: el.height,
     }))
 
-  // 预路由所有 edge（含正交避障），收集标签初始位置。
-  // 用 routeEdgeBundle 成组路由：同一节点同侧的边自动扇出错开、重合边升级
-  // 正交/贝塞尔 —— 比逐条 routeEdge 更能避免平行边/重合边叠在同一条线上。
+  // 节点矩形（标签碰撞检测用）
+  const nodeRects = [...nodeById.values()].map((n) => ({ x: n.x, y: n.y, width: n.width, height: n.height }))
+
   const edgeEls = scene.elements.filter((el) => el.type === 'edge')
   const labelPlacements = new Map<string, { text: string; x: number; y: number }>()
   const bundle = routeEdgeBundle(
@@ -204,8 +200,10 @@ export function renderSceneSvg(scene: Scene, _opts: RenderOptions = {}): string 
       }
       if (!routed) return null
       if (routed.label) {
-        const mid = edgeLabelAnchor(routed)
-        labelPlacements.set(el.id, { text: routed.label, x: mid.x + 8, y: mid.y - 8 })
+        // edgeLabelAnchor 已按线段方向算好偏移（含分支边的法向偏移），
+        // 这里不能再叠加固定偏移，否则会覆盖掉正确位置、把标签推回线上。
+        const anchor = edgeLabelAnchor(routed)
+        labelPlacements.set(el.id, { text: routed.label, x: anchor.x, y: anchor.y })
       }
       return { el, routed }
     })
@@ -250,6 +248,18 @@ export function renderSceneSvg(scene: Scene, _opts: RenderOptions = {}): string 
     lp.x = chosen.x
     lp.y = chosen.y
   }
+
+  return { nodeById, nodeRects, frameNodes, edgeEls, routedEdges, labelPlacements }
+}
+
+export function renderSceneSvg(scene: Scene, _opts: RenderOptions = {}): string {
+  const usePaper = scene.paper !== false
+  const bg = usePaper ? '#faf9f4' : scene.background_color || '#ffffff'
+  const defs = usePaper
+    ? `<radialGradient id="vg" cx="50%" cy="42%" r="80%"><stop offset="0%" stop-color="rgba(0,0,0,0)"/><stop offset="100%" stop-color="rgba(120,110,80,0.10)"/></radialGradient>`
+    : ''
+
+  const { nodeById, routedEdges, labelPlacements } = routeSceneEdges(scene)
 
   const body: string[] = []
   if (usePaper) body.push(Svg.rect(0, 0, scene.width, scene.height, { fill: bg }))
