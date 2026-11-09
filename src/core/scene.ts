@@ -82,6 +82,17 @@ export interface EdgeElement extends SceneElementBase {
     dashed?: boolean
     label?: string
     arrow?: string
+    /**
+     * 冻结的最终路由（见 core/route-cache.ts）。
+     * 规划/绘制阶段算好的路径写在这里，渲染层优先复用（整体平移时平移复用），
+     * 避免渲染时用另一套参数重算导致边贴边 / 斜穿。
+     */
+    route?: unknown
+    /**
+     * 正交路由的最少转折数（1 = 强制 ≥3 段 U/Z 型，不贴节点边线）。
+     * 架构图 / ER 图需要，渲染层从 data 读，不再写死 0。
+     */
+    minBends?: number
     [k: string]: unknown
   }
 }

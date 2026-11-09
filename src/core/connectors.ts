@@ -1048,11 +1048,20 @@ export function routeEdge(
   if (type === 'orthogonal') {
     const exclude = [from.key, to.key]
     points = routeOrthogonalAvoid(fromP, toP, cfg.obstacles ?? [], exclude, fromSide, toSide, effMinBends, cfg.channelShift ?? 0)
-    // 强制 U/Z 型（minBends≥1）但正交路由只能产出退化路径（<3 段：直线/L 型，
-    // 会与主链路直线重叠）→ 弧线兜底。典型场景：同一行的回边。
+    // 强制 U/Z 型（minBends≥1）但正交路由只能产出退化路径 → 兜底。
+    //
+    // 关键：退化路径分两种情况，退化的原因不同，处理也必须不同 ——
+    //   (a) 直线（2 点，首尾直达）：两锚点本来就严格对齐，视觉上是一条
+    //       完美的直线。此前的做法是一律升级成 arc，而弧线在几十像素的
+    //       短跨度上只是一段几乎看不出的弯 —— 连线看起来像"没接上"。
+    //       实测同一张纵向流程图里有 3 条主链边被误伤成小弧。应当保持直线。
+    //   (b) L 型（3 点）：会与主链路的直线段部分重叠，确实需要绕行 → 升级 arc。
     if (effMinBends >= 1 && points.length < 4) {
-      effType = 'arc'
-      points = [fromP, toP]
+      const collinear = Math.abs(fromP.x - toP.x) < 0.5 || Math.abs(fromP.y - toP.y) < 0.5
+      if (!collinear) {
+        effType = 'arc'
+        points = [fromP, toP]
+      }
     }
   } else if (type === 'straight') {
     points = [fromP, toP]

@@ -16,6 +16,7 @@ import { createElement, type Scene, type TextElement } from '../core/scene.js'
 import type { ShapeType } from '../core/shapes.js'
 import type { LayoutKind } from '../core/layout.js'
 import { routeEdgeBundle, type ConnectorNode, type EdgeType } from '../core/edge-bundle.js'
+import { freezeRoute } from '../core/route-cache.js'
 import type { DiamondBranch } from '../core/connectors.js'
 import type {
   FinalPlan,
@@ -65,7 +66,7 @@ function branchFromLabel(label?: string): DiamondBranch {
   return undefined
 }
 
-/** 节点矩形表 → 可路由 ConnectorNode 表。 */
+/** 节点矩形 → 可路由 ConnectorNode 表。 */
 export function rectsToConnectorNodes(
   rects: Record<string, { x: number; y: number; width: number; height: number }>,
   shapes: Record<string, ShapeType> = {},
@@ -75,6 +76,11 @@ export function rectsToConnectorNodes(
     m.set(key, { key, shape: shapes[key] ?? 'rectangle', x: r.x, y: r.y, width: r.width, height: r.height })
   }
   return m
+}
+
+/** 单个矩形 → ConnectorNode（冻结路由时需要节点当时的矩形）。 */
+function rectNode(key: string, r: { x: number; y: number; width: number; height: number }): ConnectorNode {
+  return { key, shape: 'rectangle', x: r.x, y: r.y, width: r.width, height: r.height }
 }
 
 // ---------------------------------------------------------------------------
@@ -305,6 +311,8 @@ function drawFlowEdges(
     { separateInOut: true },
   )
   for (const edge of bundle.edges) {
+    const fromN = connNodes.get(edge.from)
+    const toN = connNodes.get(edge.to)
     scene.elements.push(
       createElement('edge', {
         id: makeId('edge'),
@@ -325,7 +333,11 @@ function drawFlowEdges(
           // 透传布局期语义：渲染层会重新路由一次，必须知道哪些边是回边，
           // 否则会退回「内部正交通道」而斜穿主链。
           backedge: backKeys.has(`${edge.from}->${edge.to}`),
+          // 正交最少转折数：回边强制 U/Z 型，避免与主链路重叠
+          minBends: backKeys.has(`${edge.from}->${edge.to}`) ? 1 : undefined,
           direction: plan.direction,
+          // 冻结最终路由：渲染层整体平移后直接复用，不再用另一套参数重算
+          route: fromN && toN ? freezeRoute(edge, fromN, toN) : undefined,
         },
       }),
     )
@@ -495,17 +507,40 @@ export function drawErScene(
     const fill = ent.fill ?? palette[pal++ % palette.length]
     const headerId = makeId('er_header')
     entityIds[ent.key] = headerId
+    // 实体 = 【一个整高外框】+ 白色字段区 + 分隔线。
+    //
+    // 为什么外框必须是整高实体盒，而不是只有 40px 的表头条：
+    //   1. 关系线两端绑定的就是外框元素，布局期算路径用的是整高实体盒。
+    //      若外框只有表头那么高，渲染前的「冻结路径校验」会发现节点几何不符，
+    //      于是丢弃规划好的路径、用另一套参数重算 —— 实测重算结果是一条
+    //      半径几百像素的大圆弧，斜穿整张图（正是"边不干净"的元凶）。
+    //   2. 端点锚点必须落在实体真正的边框上，否则关系线会停在实体内部。
+    // 表头的彩色区靠「上方保留填充、下方盖白」实现，视觉与原来一致。
     scene.elements.push(
       createElement('shape', {
         id: headerId,
         x: r.x,
         y: r.y,
         width: r.width,
-        height: 40,
+        height: r.height,
         stroke_color: '#1e1e1e',
         background_color: fill,
         fill_style: 'hachure',
         stroke_width: 2,
+        data: { shape: 'rectangle' },
+      }),
+      // 字段区（白色）：内缩几像素，避免盖住整高外框的描边（手绘描边有抖动）
+      createElement('shape', {
+        id: makeId('er_body'),
+        x: r.x + 3,
+        y: r.y + 40,
+        width: Math.max(1, r.width - 6),
+        height: Math.max(1, r.height - 40 - 3),
+        stroke_color: 'transparent',
+        background_color: '#ffffff',
+        fill_style: 'solid',
+        stroke_width: 1,
+        roughness: 0,
         data: { shape: 'rectangle' },
       }),
       createElement('text', {
@@ -577,18 +612,18 @@ export function drawErScene(
       }
       fy += 26
     }
+    // 表头与字段区的分隔线：画在整高外框内部（外框本身已覆盖整高）
     scene.elements.push(
-      createElement('shape', {
-        id: makeId('er_body'),
-        x: r.x,
-        y: r.y + 40,
-        width: r.width,
-        height: r.height - 40,
+      createElement('line', {
+        id: makeId('er_divider'),
+        x: 0,
+        y: 0,
+        width: 0,
+        height: 0,
         stroke_color: '#1e1e1e',
-        background_color: '#ffffff',
-        fill_style: 'none',
-        stroke_width: 2,
-        data: { shape: 'rectangle' },
+        stroke_width: 1.5,
+        roughness: 0.6,
+        data: { points: [[r.x, r.y + 40], [r.x + r.width, r.y + 40]] },
       }),
     )
   }
@@ -597,6 +632,11 @@ export function drawErScene(
     const fromId = entityIds[rel.from]
     const toId = entityIds[rel.to]
     if (!fromId || !toId) continue
+    // 规划期已算好关系线路径（planErDiagram → routeEdgeBundle）。这里把它冻结进
+    // edge.data.route，渲染层平移后直接复用 —— 否则渲染层会用另一套参数重算，
+    // 把「已避障、已扇出」的好路径覆盖成斜穿实体的直线。
+    const fromRect = er.entities[rel.from]
+    const toRect = er.entities[rel.to]
     scene.elements.push(
       createElement('edge', {
         id: makeId('er_rel'),
@@ -615,6 +655,9 @@ export function drawErScene(
           arrow: 'none',
           from_card: rel.fromCard,
           to_card: rel.toCard,
+          // ER 关系线走正交（≥3 段 U/Z 型），避免直连斜穿中间实体
+          minBends: rel.type === 'orthogonal' ? 1 : undefined,
+          route: fromRect && toRect ? freezeRoute(rel, rectNode(rel.from, fromRect), rectNode(rel.to, toRect)) : undefined,
         },
       }),
     )
@@ -726,6 +769,12 @@ export function drawArchScene(
     const fromId = moduleIds[link.from]
     const toId = moduleIds[link.to]
     if (!fromId || !toId) continue
+    // 规划期已算好层感知路径（planArchitectureDiagram → routeEdgeBundle + 层框避障）。
+    // 冻结进 edge.data.route 供渲染层复用 —— 否则渲染层会退回「通用正交路由」
+    // 且 minBends=0，把「出源层框 → 框间空隙位移 → 入目标层框」的好路径
+    // 覆盖成贴边 L 型（这就是架构图边看起来不干净的主因）。
+    const fromRect = moduleRects[link.from]
+    const toRect = moduleRects[link.to]
     scene.elements.push(
       createElement('edge', {
         id: makeId('arch_link'),
@@ -739,13 +788,21 @@ export function drawArchScene(
           from: fromId,
           to: toId,
           edge_type: link.type,
-          dashed: link.dashed === false ? false : true,
+          // 未指定 = 实线（此前默认虚线，视觉上比实线弱一档，架构图的依赖关系
+          // 应当清晰可读；确需虚线时在 link 上显式传 dashed: true）。
+          dashed: link.dashed === true,
           label: link.label,
           arrow: 'triangle',
+          // 正交 ≥3 段（禁止 L 型贴层框/模块边线）
+          minBends: link.type === 'orthogonal' ? 1 : undefined,
           fromLayer: moduleLayerRect[link.from],
           toLayer: moduleLayerRect[link.to],
           // 全部层框：跨多层连线需要知道中间隔着哪些层
           allLayers: Object.values(layerRects),
+          route:
+            fromRect && toRect
+              ? freezeRoute(link, rectNode(link.from, fromRect), rectNode(link.to, toRect))
+              : undefined,
         },
       }),
     )

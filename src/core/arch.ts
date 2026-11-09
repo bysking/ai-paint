@@ -10,7 +10,7 @@
  * 输出：层框坐标 + 子模块坐标 + 跨层关系（供工具层绘制 frame / shape / edge）。
  */
 
-import type { ConnectorNode } from './connectors.js'
+import type { ConnectorNode, Side } from './connectors.js'
 import { routeEdgeBundle, type EdgeType } from './edge-bundle.js'
 
 export interface ArchLayer {
@@ -50,7 +50,7 @@ export interface ArchDiagram {
       modules: Record<string, { x: number; y: number; width: number; height: number; fill: string }>
     }
   >
-  /** 跨层关系（正交路由后的路径点）。 */
+  /** 跨层关系（路由后的路径点）。 */
   links: {
     from: string
     to: string
@@ -59,6 +59,14 @@ export interface ArchDiagram {
     dashed?: boolean
     type: EdgeType
     points: { x: number; y: number }[]
+    /** 路径命令（曲线类型用；渲染层复用，避免重算）。 */
+    pathD: string
+    fromSide: Side
+    toSide: Side
+    fromTip: { x: number; y: number }
+    fromAngle: number
+    arrowTip: { x: number; y: number }
+    arrowAngle: number
   }[]
 }
 
@@ -82,13 +90,12 @@ const DEF: Required<ArchOptions> = {
   // 层间距需要容纳「跨层连线的水平转向段」：连线要在两层框之间的通道里拐弯，
   // 通道太窄会导致正交路由找不到位置、退回贴边或斜穿。96 是实测的舒适值。
   layerGap: 96,
-  // 同层模块间距。弧线/贝塞尔要在模块之间可见地弯曲，
-  // 间距过小（24px）时弧高只有几像素、看起来就是直线。
+  // 同层模块间距。正交路由的通道段在模块之间垂直穿过，间距过小时通道贴着模块。
   moduleGap: 44,
-  // 默认用贝塞尔曲线：控制点沿垂直方向拉开形成 S 形，
-  // 在多来源的跨层连线交叉处比单向圆弧更容易分辨来向，
-  // 也不会像正交路由那样在层间空隙里堆出一排平行折线。
-  linkType: 'bezier' as EdgeType,
+  // 默认正交路由：层与层之间的依赖是「上下对齐的竖直段 + 空隙里的水平转向段」，
+  // 正交线天然分层清晰、可追踪。此前默认 bezier，控制点沿弦法向弯 50px，
+  // 多条跨层线交叠时会糊成一团"面条"，远比正交难读。
+  linkType: 'orthogonal' as EdgeType,
   headerHeight: 40,
   moduleWidth: 170,
   moduleHeight: 56,
@@ -191,8 +198,29 @@ export function planArchitectureDiagram(
       dashed: l.dashed ?? false,
       label: l.label,
       arrow: 'triangle',
+      // 层感知路由必需：连线要知道自己两端属于哪个层框，
+      // 才能沿「出源层框 → 框间空隙水平位移 → 入目标层框」走，而不是横穿层框内部。
+      fromLayer: layerRects.get(moduleLayer.get(l.from) ?? ''),
+      toLayer: layerRects.get(moduleLayer.get(l.to) ?? ''),
+      allLayers: [...layerRects.values()],
     })),
-    { minBends: 1 }, // 架构图：非对齐连线强制 ≥3 段正交路由（U 型）
+    {
+      // 架构图：非对齐连线强制 ≥3 段正交路由（U 型），禁止 L 型贴边
+      minBends: 1,
+      // 层框作为障碍物：连线绕开其它层框，而不是从其内部横穿。
+      // 端点所在的层框必须豁免，否则连线永远出不了自己的层。
+      extraObstaclesFor: (fromKey, toKey) => {
+        const fromL = layerRects.get(moduleLayer.get(fromKey) ?? '')
+        const toL = layerRects.get(moduleLayer.get(toKey) ?? '')
+        return [...layerRects.entries()]
+          .filter(
+            ([, lr]) =>
+              !(fromL && lr.x === fromL.x && lr.y === fromL.y && lr.width === fromL.width) &&
+              !(toL && lr.x === toL.x && lr.y === toL.y && lr.width === toL.width),
+          )
+          .map(([key, lr]) => ({ key, shape: 'rectangle' as const, ...lr }))
+      },
+    },
   )
   const routedMap = new Map(bundle.edges.map((e) => [`${e.from}->${e.to}`, e]))
 
@@ -207,6 +235,13 @@ export function planArchitectureDiagram(
       dashed: l.dashed,
       type: t,
       points: routed?.points ?? [],
+      pathD: routed?.pathD ?? '',
+      fromSide: routed?.fromSide ?? ('bottom' as Side),
+      toSide: routed?.toSide ?? ('top' as Side),
+      fromTip: routed?.fromTip ?? routed?.points[0] ?? { x: 0, y: 0 },
+      fromAngle: routed?.fromAngle ?? 0,
+      arrowTip: routed?.arrowTip ?? routed?.points[routed.points.length - 1] ?? { x: 0, y: 0 },
+      arrowAngle: routed?.arrowAngle ?? 0,
     }
   })
 

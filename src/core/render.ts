@@ -18,8 +18,10 @@ import {
   type EdgeType,
   type ArrowHead,
   type ConnectorNode,
+  type Side,
 } from './connectors.js'
 import { routeEdgeBundle } from './edge-bundle.js'
+import { reviveRoute } from './route-cache.js'
 import type {
   Scene,
   SceneElement,
@@ -137,26 +139,53 @@ export function routeSceneEdges(scene: Scene) {
 
   const edgeEls = scene.elements.filter((el) => el.type === 'edge')
   const labelPlacements = new Map<string, { text: string; x: number; y: number }>()
+  const arrowOf = (d: Record<string, unknown>): ArrowHead =>
+    (ARROW_HEADS.includes(d.arrow as ArrowHead) ? d.arrow : 'triangle') as ArrowHead
+
+  // 优先复用「规划阶段冻结的路由」：架构图 / ER 图的规划器已经用正确参数
+  // （minBends=1、层框感知）算过一遍路径，这里若重算会用另一套参数把好路径覆盖掉。
+  // 只有节点被单独移动 / 改尺寸（冻结失效）或元素是手工 add_edge 创建时才重算。
+  const routedByEl = new Map<SceneElement, RoutedEdge>()
+  const pending: EdgeElement[] = []
+  for (const el of edgeEls) {
+    const d = el.data ?? {}
+    const from = nodeById.get(String(d.from ?? ''))
+    const to = nodeById.get(String(d.to ?? ''))
+    if (!from || !to) continue
+    const frozen = reviveRoute(d.route, from, to, {
+      dashed: Boolean(d.dashed),
+      label: typeof d.label === 'string' ? d.label : undefined,
+      arrow: arrowOf(d),
+    })
+    if (frozen) routedByEl.set(el, frozen)
+    else pending.push(el)
+  }
+
   const bundle = routeEdgeBundle(
     nodeById,
-    edgeEls
+    pending
       .map((el) => {
         const d = el.data ?? {}
         const from = nodeById.get(String(d.from ?? ''))
         const to = nodeById.get(String(d.to ?? ''))
         if (!from || !to) return null
         const type = (EDGE_TYPES.includes(d.edge_type as EdgeType) ? d.edge_type : 'straight') as EdgeType
-        const arrow = (ARROW_HEADS.includes(d.arrow as ArrowHead) ? d.arrow : 'triangle') as ArrowHead
         return {
           from: from.key,
           to: to.key,
           type,
           dashed: Boolean(d.dashed),
           label: typeof d.label === 'string' ? d.label : undefined,
-          arrow,
+          arrow: arrowOf(d),
           // 保持布局期的回边语义与方向：回边必须走外侧走廊，否则会斜穿主链
           backedge: d.backedge === true,
           direction: d.direction === 'LR' ? ('LR' as const) : ('TB' as const),
+          // 正交最少转折数：架构图 / ER 图需要 ≥3 段（不贴节点边线），
+          // 由绘制层写进 data.minBends（此前这里写死 0，把规划期的 1 覆盖掉了）。
+          minBends: Number(d.minBends) >= 1 ? 1 : undefined,
+          // 强约束桩点（架构图/ER 图规划期已协调好，避免重算时又改回主方向侧）
+          fromSide: SIDES.includes(d.fromSide as Side) ? (d.fromSide as Side) : undefined,
+          toSide: SIDES.includes(d.toSide as Side) ? (d.toSide as Side) : undefined,
           // 架构图：模块所属层框，供层感知路由使用
           fromLayer: d.fromLayer as { x: number; y: number; width: number; height: number } | undefined,
           toLayer: d.toLayer as { x: number; y: number; width: number; height: number } | undefined,
@@ -183,21 +212,24 @@ export function routeSceneEdges(scene: Scene) {
     },
   )
   // 注意：同一对节点可有多条边（平行边），bundle.edges 按请求顺序返回，
-  // 与 edgeEls 一一对应 —— 用队列逐条消费，避免同 pair 多条边被合并。
+  // 与 pending 一一对应 —— 用队列逐条消费，避免同 pair 多条边被合并。
   const queue = [...bundle.edges]
+  for (const el of pending) {
+    const d = el.data ?? {}
+    const from = nodeById.get(String(d.from ?? ''))
+    const to = nodeById.get(String(d.to ?? ''))
+    if (!from || !to) continue
+    // 找到与 from/to 匹配的下一条 bundle 边（跳过已被消费的）
+    const idx = queue.findIndex((e) => e.from === from.key && e.to === to.key)
+    if (idx < 0) continue
+    const routed = queue[idx]
+    queue.splice(idx, 1)
+    routedByEl.set(el, routed)
+  }
+
   const routedEdges = edgeEls
     .map((el) => {
-      const d = el.data ?? {}
-      const from = nodeById.get(String(d.from ?? ''))
-      const to = nodeById.get(String(d.to ?? ''))
-      if (!from || !to) return null
-      // 找到与 from/to 匹配的下一条 bundle 边（跳过已被消费的）
-      let routed: RoutedEdge | undefined
-      const idx = queue.findIndex((e) => e.from === from.key && e.to === to.key)
-      if (idx >= 0) {
-        routed = queue[idx]
-        queue.splice(idx, 1)
-      }
+      const routed = routedByEl.get(el)
       if (!routed) return null
       if (routed.label) {
         // edgeLabelAnchor 已按线段方向算好偏移（含分支边的法向偏移），
@@ -550,6 +582,7 @@ function ellipsePoly(cx: number, cy: number, rx: number, ry: number): Point[] {
 
 const EDGE_TYPES: EdgeType[] = ['straight', 'orthogonal', 'bezier', 'smooth', 'arc']
 const ARROW_HEADS: ArrowHead[] = ['none', 'triangle', 'circle', 'diamond']
+const SIDES: Side[] = ['top', 'bottom', 'left', 'right']
 
 function arrowShape(arrow: ArrowHead, tip: Point, ang: number, size: number, color: string): string {
   const back = {

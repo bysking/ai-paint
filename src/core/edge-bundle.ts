@@ -42,6 +42,10 @@ export interface EdgeRequest {
   branch?: DiamondBranch
   /** 回边（构成环、从下游回到上游的边）。目标入点选垂直主布局方向的侧。 */
   backedge?: boolean
+  /** 显式指定起点桩点（最高优先级；ER 图网格布局按几何就近选边时使用）。 */
+  fromSide?: 'top' | 'bottom' | 'left' | 'right'
+  /** 显式指定终点桩点（最高优先级）。 */
+  toSide?: 'top' | 'bottom' | 'left' | 'right'
   /** 架构图：源/目标模块所在的层框（层感知路由用）。 */
   fromLayer?: { x: number; y: number; width: number; height: number }
   toLayer?: { x: number; y: number; width: number; height: number }
@@ -226,19 +230,26 @@ export function routeEdgeBundle(
     // 自环边：不参与选边（由最终路由按 selfSide 生成环）
     // 菱形（决策节点）：按布局方向选桩点（是走主方向，否走侧向）
     // 回边：源出点 + 目标入点都选垂直主布局方向的侧（菱形保留分支语义）
+    // 显式桩点（req.fromSide / req.toSide）：最高优先级，直接采用。
+    //   ER 图是网格布局，桩点必须按几何就近选（pickSide 的 TB 主方向语义
+    //   会让横向并排的两张表绕出大 U 型），因此由调用方显式指定。
     const direction = req.direction ?? 'TB'
     const fromSide = req.from === req.to
       ? 'right'
-      : req.backedge
-        ? fromN.shape === 'diamond'
-          ? pickSideForShape(fromN, toN, true, pick(fC, tC), direction, req.branch)
-          : backedgeExitSide(fC, tC, direction)
-        : pickSideForShape(fromN, toN, true, pick(fC, tC), direction, req.branch)
+      : req.fromSide
+        ? req.fromSide
+        : req.backedge
+          ? fromN.shape === 'diamond'
+            ? pickSideForShape(fromN, toN, true, pick(fC, tC), direction, req.branch)
+            : backedgeExitSide(fC, tC, direction)
+          : pickSideForShape(fromN, toN, true, pick(fC, tC), direction, req.branch)
     const toSide = req.from === req.to
       ? 'right'
-      : req.backedge
-        ? backedgeEntrySide(fC, tC, direction)
-        : pickSideForShape(toN, fromN, false, pick(tC, fC), direction)
+      : req.toSide
+        ? req.toSide
+        : req.backedge
+          ? backedgeEntrySide(fC, tC, direction)
+          : pickSideForShape(toN, fromN, false, pick(tC, fC), direction)
     return { req, fromSide, toSide }
   }).filter((x): x is NonNullable<typeof x> => x !== null)
 

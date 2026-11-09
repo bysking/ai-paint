@@ -3,7 +3,8 @@
  * 布局：实体在网格上排布，关系以边连接，支持 1:1 / 1:N / N:M 标注。
  */
 
-import type { ConnectorNode } from './connectors.js'
+import type { ConnectorNode, Side } from './connectors.js'
+import { pickSide } from './connectors.js'
 import { routeEdgeBundle } from './edge-bundle.js'
 
 export interface ErEntity {
@@ -24,7 +25,11 @@ export interface ErRelation {
   fromCard?: string
   toCard?: string
   label?: string
+  /** 连线类型。默认 orthogonal（直连斜线会穿过中间的实体）。 */
   type?: 'straight' | 'orthogonal' | 'bezier'
+  /** 显式指定起/终侧（不传则按几何相对位置推断）。 */
+  fromSide?: 'top' | 'bottom' | 'left' | 'right'
+  toSide?: 'top' | 'bottom' | 'left' | 'right'
 }
 
 export interface ErDiagram {
@@ -40,6 +45,16 @@ export interface ErDiagram {
     type: 'straight' | 'orthogonal' | 'bezier'
     /** 连线路径点（裁剪到实体边缘）。 */
     points: { x: number; y: number }[]
+    /** 路径命令（曲线类型用；渲染层复用，避免重算）。 */
+    pathD: string
+    fromSide: 'top' | 'bottom' | 'left' | 'right'
+    toSide: 'top' | 'bottom' | 'left' | 'right'
+    /** 起点侧接触点与切入角（ER 端标记绘制用）。 */
+    fromTip: { x: number; y: number }
+    fromAngle: number
+    /** 箭头尖端（=终点侧接触点）与切入角。 */
+    arrowTip: { x: number; y: number }
+    arrowAngle: number
   }[]
 }
 
@@ -49,6 +64,64 @@ export interface ErOptions {
   padding?: number
   fieldHeight?: number
   headerHeight?: number
+  /**
+   * 桩点按几何相对位置选（默认 true），而不是按分层图的主方向语义。
+   *
+   * 分层图（TB）里「优先走上下边」是对的，但 ER 实体是网格排布：两个实体
+   * 若横向并排、纵向几乎同高，主方向语义会强行让连线走底边出、顶边进，
+   * 绕出一个大 U 型，而几何就近选择本可以是一条直线。ER 的入/出端由
+   * 「谁在上面、谁在下面、谁在左右」直接决定才是最自然的。
+   */
+  sideByGeometry?: boolean
+  /**
+   * 关系线默认类型（单条 relation 的 type 优先）。默认 'orthogonal'：
+   * 网格里两个实体常被其它实体隔开，直连斜线会横穿过去；正交走线会绕开。
+   */
+  defaultRelationType?: 'straight' | 'orthogonal' | 'bezier'
+}
+
+/** 节点四边中心（回退用；缺 rect 时给一个安全值）。 */
+function centerOf(n: ConnectorNode | undefined): { x: number; y: number } {
+  if (!n) return { x: 0, y: 0 }
+  return { x: n.x + n.width / 2, y: n.y + n.height / 2 }
+}
+
+/**
+ * ER 网格里的桩点选择（一次给出两端，保证互补）。
+ *
+ * 为什么不能直接用分层图的 pickSide：那是「TB → 优先上下边」的主方向语义，
+ * 在网格布局里，横向并排的两张表会被强行要求走底边出、顶边进，绕出一个大 U 型；
+ * 而它们本可以是一条水平直线（ER 里最常见的 1:N 相邻表就是这个形态）。
+ *
+ * 规则（按优先级）：
+ *   1. 两实体在 x 方向投影重叠（上下堆叠）→ 竖直连接（下出上入）；
+ *   2. 两实体在 y 方向投影重叠（左右并排）→ 水平连接（右出左入）；
+ *   3. 斜对角（两个方向都不重叠）→ 取中心位移较大的轴。
+ * 前两条让「同列/同行的相邻实体」拿到一条完美直线，不再有绕行。
+ */
+function pickErSides(
+  from: { x: number; y: number; width: number; height: number } | undefined,
+  to: { x: number; y: number; width: number; height: number } | undefined,
+): { fromSide: Side; toSide: Side } {
+  if (!from || !to) return { fromSide: 'right', toSide: 'left' }
+  const xOverlap = Math.min(from.x + from.width, to.x + to.width) - Math.max(from.x, to.x)
+  const yOverlap = Math.min(from.y + from.height, to.y + to.height) - Math.max(from.y, to.y)
+
+  // 上下堆叠 → 竖直
+  if (xOverlap > 0 && yOverlap <= 0) {
+    return to.y >= from.y ? { fromSide: 'bottom', toSide: 'top' } : { fromSide: 'top', toSide: 'bottom' }
+  }
+  // 左右并排 → 水平
+  if (yOverlap > 0 && xOverlap <= 0) {
+    return to.x >= from.x ? { fromSide: 'right', toSide: 'left' } : { fromSide: 'left', toSide: 'right' }
+  }
+  // 斜对角：取中心位移较大的轴
+  const dx = to.x + to.width / 2 - (from.x + from.width / 2)
+  const dy = to.y + to.height / 2 - (from.y + from.height / 2)
+  if (Math.abs(dx) >= Math.abs(dy)) {
+    return dx >= 0 ? { fromSide: 'right', toSide: 'left' } : { fromSide: 'left', toSide: 'right' }
+  }
+  return dy >= 0 ? { fromSide: 'bottom', toSide: 'top' } : { fromSide: 'top', toSide: 'bottom' }
 }
 
 export function planErDiagram(
@@ -56,7 +129,15 @@ export function planErDiagram(
   relations: ErRelation[],
   opts: ErOptions = {},
 ): ErDiagram {
-  const { columnGap = 100, rowGap = 90, padding = 60, fieldHeight = 26, headerHeight = 40 } = opts
+  const {
+    columnGap = 100,
+    rowGap = 90,
+    padding = 60,
+    fieldHeight = 26,
+    headerHeight = 40,
+    sideByGeometry = true,
+    defaultRelationType = 'orthogonal',
+  } = opts
 
   const sizeOf = (e: ErEntity) => ({
     // 宽度 = 表名（居中标题）与字段行（主键图标 + 字段名 + 类型）的最大者
@@ -142,20 +223,57 @@ export function planErDiagram(
     nodeMap.set(e.key, { key: e.key, shape: 'rectangle', ...r })
   }
 
-  // 关系路由（成组路由：同侧自动错开 + 近平行线分离）
+  // 关系路由（成组路由：同侧自动错开 + 近平行线分离 + 正交避障）。
+  // 关键点：
+  //   1. type 默认 orthogonal —— 网格里两实体常被别的实体隔开，直连斜线会穿过去；
+  //   2. 显式传 fromSide/toSide —— routeEdgeBundle 默认按「分层主方向」选边
+  //      （TB → 优先上下边），ER 是网格，应按几何就近选边，否则横向并排的两个
+  //      实体会绕出大 U 型；
+  //   3. 障碍物 = 全部实体（排除两端）—— 正交路由据此绕开中间实体。
+  const relationsMeta = relations.map((rel) => {
+    const from = rects.get(rel.from)
+    const to = rects.get(rel.to)
+    // sideByGeometry=false → 退回分层图主方向语义（TB 优先上下边）
+    const sides = sideByGeometry && from && to
+      ? pickErSides(from, to)
+      : (() => {
+          const fc = from ? { x: from.x + from.width / 2, y: from.y + from.height / 2 } : { x: 0, y: 0 }
+          const tc = to ? { x: to.x + to.width / 2, y: to.y + to.height / 2 } : { x: 0, y: 0 }
+          return { fromSide: pickSide(fc, tc, 'TB'), toSide: pickSide(tc, fc, 'TB') }
+        })()
+    return {
+      rel,
+      type: (rel.type ?? defaultRelationType) as 'straight' | 'orthogonal' | 'bezier',
+      fromSide: rel.fromSide ?? sides.fromSide,
+      toSide: rel.toSide ?? sides.toSide,
+    }
+  })
+
+  const allNodes = [...nodeMap.values()]
   const bundle = routeEdgeBundle(
     nodeMap,
-    relations.map((rel) => ({
-      from: rel.from,
-      to: rel.to,
-      type: (rel.type ?? 'straight') as 'straight' | 'orthogonal' | 'bezier',
+    relationsMeta.map((m) => ({
+      from: m.rel.from,
+      to: m.rel.to,
+      type: m.type,
       arrow: 'none',
+      // ER 网格：桩点按几何就近（显式 fromSide/toSide），不走分层主方向语义
+      direction: 'LR' as const,
+      fromSide: m.fromSide,
+      toSide: m.toSide,
+      // 注意：这里不能传 minBends —— 相邻实体的直线/2 段路径是最优解，
+      // 强制 ≥3 段会把它们变成绕行的大 U 型。正交避障本身就保证不穿实体。
     })),
+    {
+      // 中间实体作为障碍，正交线绕开而不是穿过去
+      extraObstaclesFor: (fromKey, toKey) =>
+        allNodes.filter((n) => n.key !== fromKey && n.key !== toKey),
+    },
   )
   const routedMap = new Map(bundle.edges.map((e) => [`${e.from}->${e.to}`, e]))
 
-  const outRelations = relations.map((rel) => {
-    const t = (rel.type ?? 'straight') as 'straight' | 'orthogonal' | 'bezier'
+  const outRelations = relations.map((rel, i) => {
+    const meta = relationsMeta[i]
     const routed = routedMap.get(`${rel.from}->${rel.to}`)
     return {
       from: rel.from,
@@ -163,8 +281,15 @@ export function planErDiagram(
       fromCard: rel.fromCard,
       toCard: rel.toCard,
       label: rel.label,
-      type: t,
+      type: meta.type,
       points: routed?.points ?? [],
+      pathD: routed?.pathD ?? '',
+      fromSide: routed?.fromSide ?? meta.fromSide,
+      toSide: routed?.toSide ?? meta.toSide,
+      fromTip: routed?.fromTip ?? routed?.points[0] ?? { x: 0, y: 0 },
+      fromAngle: routed?.fromAngle ?? 0,
+      arrowTip: routed?.arrowTip ?? routed?.points[routed.points.length - 1] ?? { x: 0, y: 0 },
+      arrowAngle: routed?.arrowAngle ?? 0,
     }
   })
 

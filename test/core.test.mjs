@@ -451,6 +451,258 @@ test('routeEdge: orthogonal 生成折线', () => {
   }
 })
 
+test('正交 minBends 兜底：严格对齐的连线保持直线（不误降级成小弧）', () => {
+  // 强制 minBends=1（≥3 段）时，若两锚点本来就严格对齐，正交路由会退化成
+  // 2 点直线。此前的实现把它一律升级成 arc —— 在几十像素的短跨度上弧线只是
+  // 一段几乎看不出弯的线，视觉上像"没接上"。实测同一张纵向流程图里有 3 条
+  // 主链边被误伤。这里锁定：对齐 → 保持 2 点直线（等价于直线，只是 type 仍
+  // 标为 orthogonal）；不对齐的 L 型 → 才升级 arc。
+  const a = { key: 'a', shape: 'rectangle', x: 0, y: 0, width: 200, height: 72 }
+  const b = { key: 'b', shape: 'rectangle', x: 0, y: 300, width: 200, height: 72 }
+  const aligned = routeEdge(a, b, { type: 'orthogonal', minBends: 1 })
+  assert.equal(aligned.points.length, 2, '严格对齐的边应为 2 点直线')
+  assert.ok(!aligned.pathD.includes(' A '), '对齐边不应出现弧线命令')
+  // 2 点且严格共线 = 视觉上就是一条直线
+  assert.ok(
+    Math.abs(aligned.points[0].x - aligned.points[1].x) < 0.5 ||
+      Math.abs(aligned.points[0].y - aligned.points[1].y) < 0.5,
+    '2 点路径必须是水平或垂直的直线',
+  )
+  assert.equal(aligned.type, 'orthogonal', '类型保持 orthogonal（几何上已是直线）')
+
+  // 水平错位、垂直也错位：minBends=1 时无法产出 ≥3 段 → 升级 arc
+  const c = { key: 'c', shape: 'rectangle', x: 400, y: 300, width: 200, height: 72 }
+  const skewed = routeEdge(a, c, { type: 'orthogonal', minBends: 1 })
+  assert.ok(
+    skewed.points.length >= 4 || skewed.type === 'arc',
+    `斜向边要么给出 ≥3 段正交，要么升级 arc（实际 ${skewed.type}/${skewed.points.length} 点）`,
+  )
+  // 绝不允许"斜线直连"（两端点直连的 2 点非对齐路径）
+  if (skewed.points.length === 2) {
+    assert.ok(
+      Math.abs(skewed.points[0].x - skewed.points[1].x) < 0.5 ||
+        Math.abs(skewed.points[0].y - skewed.points[1].y) < 0.5,
+      '2 点路径只允许出现在严格对齐时（不允许斜线直连）',
+    )
+  }
+})
+
+test('显式桩点（fromSide/toSide）优先于自动选边', () => {
+  // ER 图是网格布局，桩点由规划器按几何就近显式指定；
+  // routeEdgeBundle 必须采用它，而不是又按 TB 主方向语义改回上下边。
+  const nodes = new Map([
+    ['a', { key: 'a', shape: 'rectangle', x: 0, y: 0, width: 180, height: 92 }],
+    ['b', { key: 'b', shape: 'rectangle', x: 0, y: 142, width: 180, height: 92 }],
+  ])
+  const bundle = routeEdgeBundle(nodes, [{ from: 'a', to: 'b', type: 'straight' }])
+  // 未指定时按分层主方向 → 下/上
+  assert.equal(bundle.edges[0].fromSide, 'bottom', '默认按主方向选底边')
+
+  const forced = routeEdgeBundle(nodes, [
+    { from: 'a', to: 'b', type: 'straight', fromSide: 'right', toSide: 'left' },
+  ])
+  assert.equal(forced.edges[0].fromSide, 'right', '显式 fromSide 应被采用')
+  assert.equal(forced.edges[0].toSide, 'left', '显式 toSide 应被采用')
+})
+
+// ---------- 冻结路由（规划期路径 → 渲染层复用） ----------
+
+test('ER 图：关系线默认正交，桩点按几何就近（相邻表拿到直线）', () => {
+  // 两张左右并排、纵向同高的表：最优解是一条水平直线。
+  // 若按分层主方向语义（TB 优先上下边），会被强行要求底边出、顶边进 → 绕成大 U 型。
+  const er = planErDiagram(
+    [
+      { key: 'a', label: 'A', fields: [{ name: 'id' }] },
+      { key: 'b', label: 'B', fields: [{ name: 'id' }] },
+    ],
+    [{ from: 'a', to: 'b' }],
+  )
+  const rel = er.relations[0]
+  assert.equal(rel.type, 'orthogonal', 'ER 关系线默认正交')
+  assert.equal(rel.fromSide, 'right', '右侧并排 → 从右边出')
+  assert.equal(rel.toSide, 'left', '右侧并排 → 从左边进')
+  assert.equal(rel.points.length, 2, '水平并排的相邻表应是 2 点直线')
+
+  // 上下堆叠 → 竖直直线。3 个实体时网格为 2 列 2 行，c 落在 a 正下方（同列）；
+  // 同列的两张表若按分层主方向以外的逻辑处理会绕行，几何就近则应拿到一条竖直线。
+  const er2 = planErDiagram(
+    [
+      { key: 'a', label: 'A', fields: [{ name: 'id' }, { name: 'x' }, { name: 'y' }] },
+      { key: 'b', label: 'B', fields: [{ name: 'id' }] },
+      { key: 'c', label: 'C', fields: [{ name: 'id' }] },
+    ],
+    [{ from: 'a', to: 'c' }],
+  )
+  const rel2 = er2.relations[0]
+  assert.equal(rel2.fromSide, 'bottom', '同列上下堆叠 → 从底边出')
+  assert.equal(rel2.toSide, 'top', '同列上下堆叠 → 从顶边进')
+  assert.equal(rel2.points.length, 2, '同列相邻表应是 2 点竖直线')
+})
+
+test('ER 图：关系线不穿过中间实体（正交避障）', () => {
+  // 3 张表排成一行，测最左→最右（中间隔着一张表）
+  const entities = [
+    { key: 'a', label: 'A', fields: [{ name: 'id' }] },
+    { key: 'b', label: 'B', fields: [{ name: 'id' }] },
+    { key: 'c', label: 'C', fields: [{ name: 'id' }] },
+    { key: 'd', label: 'D', fields: [{ name: 'id' }] },
+  ]
+  const er = planErDiagram(entities, [{ from: 'a', to: 'c' }])
+  const rel = er.relations[0]
+  const hits = (p, q, r) =>
+    Math.min(p.x, q.x) < r.x + r.width - 2 &&
+    Math.max(p.x, q.x) > r.x + 2 &&
+    Math.min(p.y, q.y) < r.y + r.height - 2 &&
+    Math.max(p.y, q.y) > r.y + 2
+  const others = Object.entries(er.entities).filter(([k]) => k !== 'a' && k !== 'c')
+  for (let i = 0; i < rel.points.length - 1; i++) {
+    for (const [k, r] of others) {
+      assert.ok(
+        !hits(rel.points[i], rel.points[i + 1], r),
+        `a→c 第 ${i} 段穿过了实体 ${k}`,
+      )
+    }
+  }
+})
+
+test('冻结路由：框架自由时整条路径平移复用，节点单独移动则失效重算', async () => {
+  const { freezeRoute, reviveRoute, translatePathD } = await import('../dist/core/route-cache.js')
+  const from = { key: 'a', shape: 'rectangle', x: 100, y: 100, width: 180, height: 92 }
+  const to = { key: 'b', shape: 'rectangle', x: 400, y: 300, width: 180, height: 92 }
+  const routed = routeEdge(from, to, { type: 'orthogonal', obstacles: [] })
+  const frozen = freezeRoute(routed, from, to)
+
+  // 1) 整体平移（centerScene / fitSceneContent 的效果）→ 复用且路径同步平移
+  const dx = 250
+  const dy = -40
+  const moved = { ...from, x: from.x + dx, y: from.y + dy }
+  const movedTo = { ...to, x: to.x + dx, y: to.y + dy }
+  const revived = reviveRoute(frozen, moved, movedTo)
+  assert.ok(revived, '整体平移后应能复用冻结路由')
+  assert.equal(revived.points.length, routed.points.length, '复用后路径点数不变')
+  for (let i = 0; i < routed.points.length; i++) {
+    assert.ok(
+      Math.abs(revived.points[i].x - (routed.points[i].x + dx)) < 0.01 &&
+        Math.abs(revived.points[i].y - (routed.points[i].y + dy)) < 0.01,
+      `第 ${i} 个点应随整体平移（期望 ${routed.points[i].x + dx},${routed.points[i].y + dy}，实际 ${revived.points[i].x},${revived.points[i].y}）`,
+    )
+  }
+  assert.ok(
+    Math.abs(revived.arrowTip.x - (routed.arrowTip.x + dx)) < 0.01,
+    '箭头尖端应随整体平移',
+  )
+
+  // 2) 只移动一端 → 冻结失效（必须重算，否则连线跟不住节点）
+  const onlyFrom = reviveRoute(frozen, { ...from, x: from.x + 999 }, to)
+  assert.equal(onlyFrom, null, '只移动一端应使冻结失效')
+
+  // 3) 改变尺寸 → 冻结失效
+  const resized = reviveRoute(frozen, { ...from, width: from.width + 50 }, to)
+  assert.equal(resized, null, '改变节点尺寸应使冻结失效')
+
+  // 4) 数据损坏（缺字段）→ 失效而不是崩溃
+  assert.equal(reviveRoute(null, moved, movedTo), null, 'null 应返回 null')
+  assert.equal(reviveRoute({}, moved, movedTo), null, '空对象应返回 null')
+  assert.equal(
+    reviveRoute({ ...frozen, points: [[1, 2]] }, moved, movedTo),
+    null,
+    '路径点不足应返回 null',
+  )
+
+  // 5) pathD 平移：曲线命令的坐标对平移，但 A 的半径必须保持原样
+  const arcD = 'M 10 20 A 50 50 0 0 1 100 200'
+  const shifted = translatePathD(arcD, 5, -7)
+  assert.ok(shifted.includes('A 50 50'), `圆弧半径不应被平移（实际 ${shifted}）`)
+  assert.ok(shifted.includes('15'), '起点 x 应平移 +5')
+  assert.ok(shifted.includes('105'), '圆弧终点 x 应平移 +5')
+})
+
+test('流程图：回边冻结后仍走外侧走廊（minBends 透传未被渲染层覆盖）', async () => {
+  const { planDiagram } = await import('../dist/core/plan.js')
+  const { blankScene } = await import('../dist/core/scene.js')
+  const { drawFlowScene } = await import('../dist/tools/draw.js')
+  const { routeSceneEdges } = await import('../dist/core/render.js')
+
+  const nodes = [
+    { name: 'A', type: 'process' },
+    { name: 'B', type: 'process' },
+    { name: 'C', type: 'process' },
+  ]
+  const edges = [
+    { source: 'A', target: 'B' },
+    { source: 'B', target: 'C' },
+    { source: 'C', target: 'A', label: '回退', dashed: true }, // 回边
+  ]
+  const { plan } = await planDiagram(nodes, edges, { kind: 'layered' })
+  const scene = blankScene('t', plan.sceneWidth, plan.sceneHeight)
+  drawFlowScene(scene, plan)
+
+  // 渲染层必须复用规划期冻结的路径（而不是用 minBends=0 重算）
+  const { routedEdges } = routeSceneEdges(scene)
+  const backEl = scene.elements.find((e) => e.type === 'edge' && e.data.label === '回退')
+  assert.ok(backEl.data.route, '回边应带冻结路由')
+  assert.equal(backEl.data.minBends, 1, '回边应带 minBends=1')
+  const backRouted = routedEdges.find((r) => r.el === backEl).routed
+  assert.equal(backRouted.type, 'orthogonal', '回边应保持正交')
+
+  // 回边必须走到所有节点包围盒的外侧走廊
+  const shapes = scene.elements.filter((e) => e.type === 'shape')
+  const minX = Math.min(...shapes.map((s) => s.x))
+  const maxX = Math.max(...shapes.map((s) => s.x + s.width))
+  assert.ok(
+    backRouted.points.some((p) => p.x < minX || p.x > maxX),
+    '回边应走到节点包围盒外侧的走廊',
+  )
+})
+
+test('ER 实体外框为整高实体盒（关系线锚点落在真正的边框上）', async () => {
+  const { blankScene } = await import('../dist/core/scene.js')
+  const { drawErScene } = await import('../dist/tools/draw.js')
+  const { routeSceneEdges } = await import('../dist/core/render.js')
+  const { centerScene } = await import('../dist/core/fit.js')
+
+  const scene = blankScene('er_frame')
+  drawErScene(
+    scene,
+    [
+      { key: 'u', label: 'User', fields: [{ name: 'id', key: true }, { name: 'name' }] },
+      { key: 'o', label: 'Order', fields: [{ name: 'id' }] },
+    ],
+    [{ from: 'u', to: 'o', fromCard: '1', toCard: 'N' }],
+  )
+  // 外框高度必须等于实体整高（表头 40 + 字段数×26），否则渲染前的冻结校验
+  // 会因节点几何不符而丢弃规划好的路径
+  const header = scene.elements.find((e) => e.type === 'shape' && e.id.startsWith('er_header'))
+  const body = scene.elements.find((e) => e.type === 'shape' && e.id.startsWith('er_body'))
+  assert.ok(header && body, '实体应有外框与字段区')
+  assert.equal(header.height, 40 + 2 * 26, '外框高度 = 整高实体盒')
+  assert.ok(body.height < header.height, '字段区只是外框内的白色覆盖块')
+
+  // 关系线两端锚点必须落在实体外框【外扩 END_GAP 处】（线端与边框之间留呼吸空间），
+  // 而不是停在 40px 表头条上 —— 后者是渲染层丢弃冻结路径、重算成乱弧的根因。
+  centerScene(scene, { padding: 60 })
+  const { routedEdges } = routeSceneEdges(scene)
+  assert.equal(routedEdges.length, 1, '应有一条关系线')
+  const pts = routedEdges[0].routed.points
+  const edgeEl = scene.elements.find((x) => x.type === 'edge')
+  const u = scene.elements.find((e) => e.id === edgeEl.data.from)
+  const o = scene.elements.find((e) => e.id === edgeEl.data.to)
+  const gap = 10 // connectors.END_GAP
+  const nearBorder = (p, r) =>
+    Math.abs(p.x - (r.x - gap)) < 1.5 ||
+    Math.abs(p.x - (r.x + r.width + gap)) < 1.5 ||
+    Math.abs(p.y - (r.y - gap)) < 1.5 ||
+    Math.abs(p.y - (r.y + r.height + gap)) < 1.5
+  assert.ok(nearBorder(pts[0], u), `起点应贴在源实体边框外 ${gap}px（${JSON.stringify(pts[0])} vs u=${JSON.stringify({ x: u.x, y: u.y, w: u.width, h: u.height })}）`)
+  assert.ok(
+    nearBorder(pts[pts.length - 1], o),
+    `终点应贴在目标实体边框外 ${gap}px（${JSON.stringify(pts[pts.length - 1])}）`,
+  )
+  // 且锚点必须落在整高外框上（y 在实体内部而不是只在外框顶端附近）
+  const insideVerticalSpan = (p, r) => p.y >= r.y - gap - 1 && p.y <= r.y + r.height + gap + 1
+  assert.ok(insideVerticalSpan(pts[0], u), '起点 y 应落在源实体整高范围内')
+})
+
 test('anchorPoint 支持非矩形形状（椭圆/菱形边缘中心近似）', () => {
   const node = { key: 'a', shape: 'ellipse', x: 100, y: 100, width: 100, height: 60 }
   const p = anchorPoint(node, 'right', 0)
@@ -806,6 +1058,9 @@ test('架构图：bezier / arc 曲线不越出层框间隙', () => {
     { key: 'top', label: '上层', modules: [{ key: 'a', label: 'A' }, { key: 'b', label: 'B' }] },
     { key: 'bottom', label: '下层', modules: [{ key: 'c', label: 'C' }, { key: 'd', label: 'D' }] },
   ]
+  // 出入层框的竖直段要「内缩一个内边距」（不能与层框边框共线），
+  // 因此中间点允许越出空隙边界最多 LAYER_INSET。
+  const LAYER_INSET = 12
   for (const linkType of ['bezier', 'smooth', 'arc']) {
     const arch = planArchitectureDiagram(
       layers,
@@ -818,14 +1073,14 @@ test('架构图：bezier / arc 曲线不越出层框间隙', () => {
     )
     const topBottom = arch.layers.top.y + arch.layers.top.height
     const bottomTop = arch.layers.bottom.y
-    const gapLo = topBottom
-    const gapHi = bottomTop
-    assert.ok(gapHi > gapLo, '层框之间应有空隙')
+    const gapLo = topBottom - LAYER_INSET
+    const gapHi = bottomTop + LAYER_INSET
+    assert.ok(bottomTop > topBottom, '层框之间应有空隙')
 
     for (const link of arch.links) {
       assert.equal(link.type, linkType, `连线类型应为 ${linkType}`)
-      // 首末点在模块上（必然位于层框内部，这是正确的出入线）；
-      // 中间路由点必须落在层框之间的空隙里，否则曲线会拱进层框。
+      // 首末点是模块自身的出入锚点（在层框内部，这是正确的）；
+      // 其余路由点必须落在层框之间的空隙里（含内缩余量），否则曲线会拱进层框。
       const inner = link.points.slice(1, -1)
       for (const p of inner) {
         assert.ok(
@@ -842,14 +1097,15 @@ test('架构图：linkType 可通过 ArchOptions 设为默认连线类型', () =
     { key: 'top', label: '上', modules: [{ key: 'a', label: 'A' }] },
     { key: 'bottom', label: '下', modules: [{ key: 'b', label: 'B' }] },
   ]
+  // 默认正交：层间依赖是「竖直段 + 空隙里的水平转向段」，比曲线更清晰可追踪
   const a1 = planArchitectureDiagram(layers, [{ from: 'a', to: 'b' }])
-  assert.equal(a1.links[0].type, 'bezier', '默认应为 bezier（架构图默认贝塞尔曲线）')
+  assert.equal(a1.links[0].type, 'orthogonal', '默认应为 orthogonal（架构图默认正交走线）')
 
   const a2 = planArchitectureDiagram(layers, [{ from: 'a', to: 'b' }], { linkType: 'bezier' })
   assert.equal(a2.links[0].type, 'bezier', 'linkType 应生效')
 
-  const a0 = planArchitectureDiagram(layers, [{ from: 'a', to: 'b' }], { linkType: 'orthogonal' })
-  assert.equal(a0.links[0].type, 'orthogonal', '可显式切回 orthogonal')
+  const a0 = planArchitectureDiagram(layers, [{ from: 'a', to: 'b' }], { linkType: 'straight' })
+  assert.equal(a0.links[0].type, 'straight', '可显式切到 straight')
 
   const aArc = planArchitectureDiagram(layers, [{ from: 'a', to: 'b' }], { linkType: 'arc' })
   assert.equal(aArc.links[0].type, 'arc', '可显式切到 arc')
