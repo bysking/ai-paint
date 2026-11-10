@@ -350,6 +350,22 @@ AI 端只需要提供节点 / 边数组（字段贴合 perf.md 约定）：
 | `list_plans`   | 列出本地缓存的所有绘制计划                                                                                                                                              |
 | `delete_plan`  | 删除一条缓存计划                                                                                                                                                        |
 
+### 布局检测环节（绘制前的质量闸门）
+
+AI 给出节点/边之后、**开始绘制之前**，所有图表工具会先跑一次布局检测：
+
+- 检查项：节点重叠 / 间隙过小 / 连线方向穿节点 / 孤立节点 / 图不连通 / 内容填充率过低 / 内容越出画布
+- 自动修复（`auto_fix_layout: true`，默认）：分轴推挤消除重叠、孤立节点收拢到主内容一侧、画布贴合内容重算
+- 结果通过 `layoutCheck` 字段返回：`{ ok, issues[], repairs[], width, height, stats }`，`issues` 带 `level: 'error' | 'warn'`
+- `layout_check: false` 可关闭（返回 `skipped: true`）
+
+画布与视口行为也一并收紧：
+
+- `create_diagram` / `create_flow_diagram` 的画布尺寸**取规划尺寸**再贴合内容，不再保留默认 2400×1600 空白（此前窄高流程图只剩约 4% 填充率）
+- `export_scene` / `save_scene_svg` / `save_scene_png` 默认 `fit_content: true` —— viewBox 取「画布 ∪ 内容 ∪ 连线路径 ∪ 边标签」，落在画布外的元素**不再被静默裁掉**；越界时返回 `warnings`
+- `export_scene` 另有 `auto_fit: true`（默认）：导出前把 `scene.width/height` 撑到刚好包住内容（只扩不缩，不移动元素）
+- `get_scene` 返回 `contentBounds` / `contentFitsCanvas` / `overflow`，便于在导出前发现画布没包住内容
+
 ### 输出与编辑
 
 

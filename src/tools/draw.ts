@@ -66,6 +66,57 @@ function branchFromLabel(label?: string): DiamondBranch {
   return undefined
 }
 
+// ---------------------------------------------------------------------------
+// 图标题
+// ---------------------------------------------------------------------------
+
+/** 标题占用的垂直空间（px）。标题绘在内容上方，内容整体下移这么多。 */
+export const TITLE_SPACE = 56
+
+/**
+ * 在场景顶部绘制图标题，并把已绘制的内容整体下移给它让位。
+ *
+ * 为什么需要下移：标题文本不是 edge，会参与 contentBounds 计算；如果直接画在
+ * y=0 而内容也从 y≈0 开始，居中时标题与第一个节点会挨在一起（甚至被节点压住）。
+ * 先把已有元素下移 TITLE_SPACE，再把标题放在最上方，`fitSceneContent` 就能把
+ * 「标题 + 图形」当作一个整体去居中。
+ *
+ * 必须在 fitSceneContent **之前**调用（它依赖平移量统一改坐标）。
+ */
+export function drawDiagramTitle(scene: Scene, title?: string): boolean {
+  const text = safeText((title ?? '').trim())
+  if (!text) return false
+
+  // 内容整体下移，为标题让出空间。
+  // 注意不要动 edge 的冻结路由：reviveRoute 是靠「节点实际位置 vs 冻结时记录的
+  // 位置」之差来平移路径的（允许整体平移、拒绝单独移动）。节点下移后差值正好
+  // 等于 TITLE_SPACE，路径会自动跟着走；这里再手动平移一次就会双重偏移。
+  for (const el of scene.elements) {
+    el.y += TITLE_SPACE
+    if (el.type === 'line' || el.type === 'arrow' || el.type === 'draw') {
+      el.data = {
+        ...(el.data ?? {}),
+        points: ((el.data?.points ?? []) as [number, number][]).map(([px, py]) => [px, py + TITLE_SPACE]),
+      }
+    }
+  }
+
+  const fontSize = 22
+  scene.elements.push(
+    createElement('text', {
+      id: makeId('title'),
+      x: 0,
+      y: 0,
+      width: Math.max(200, textWidth(text, fontSize) + 20),
+      height: fontSize * 1.4,
+      stroke_color: '#1e1e1e',
+      roughness: 0,
+      data: { text, font_size: fontSize, text_align: 'left' },
+    }),
+  )
+  return true
+}
+
 /** 节点矩形 → 可路由 ConnectorNode 表。 */
 export function rectsToConnectorNodes(
   rects: Record<string, { x: number; y: number; width: number; height: number }>,
@@ -854,15 +905,19 @@ export function drawPlanScene(scene: Scene, input: DiagramSceneInput): {
     case 'er':
       if (!input.entities) throw new Error('ER 图需要 entities/relations')
       drawErScene(scene, input.entities, input.relations ?? [], s)
+      drawDiagramTitle(scene, input.title)
       return { kind: 'er' }
     case 'architecture':
       if (!input.layers) throw new Error('架构图需要 layers/links')
       const { moduleIds } = drawArchScene(scene, input.layers, input.links ?? [], s)
+      drawDiagramTitle(scene, input.title)
       return { kind: 'architecture', nodeIds: moduleIds }
     default: {
       // flow / layered / tree / grid / circular：需要 FinalPlan
       if (!input.plan) throw new Error('流程图需要先调用 planDiagram 得到 FinalPlan，再传入 drawPlanScene')
       const { nodeIds } = drawFlowScene(scene, input.plan, s)
+      // 标题在图形之后绘制（drawDiagramTitle 会把内容整体下移给它让位）
+      drawDiagramTitle(scene, input.title)
       return { kind: input.kind, nodeIds }
     }
   }

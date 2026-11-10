@@ -101,8 +101,105 @@ function styleAttrs(el: SceneElement): Record<string, string> {
   return attrs
 }
 
+export interface ViewRect {
+  x: number
+  y: number
+  width: number
+  height: number
+}
+
 export interface RenderOptions {
   embedBackground?: boolean
+  /**
+   * 按内容外接盒渲染（默认 false = 严格按 scene.width/height）。
+   *
+   * 关掉时，落在画布外的元素会被 SVG viewBox **静默裁掉** —— 白图不报错。
+   * 导出场景时打开它，viewBox 会取「画布矩形 ∪ 内容外接盒」，
+   * 任何跑出画布的元素都还能看见（坐标不做任何改动）。
+   */
+  fitContent?: boolean
+  /** fitContent 时内容四周留白（px）。默认 24。 */
+  contentPadding?: number
+  /** 显式 view 矩形，优先级高于 fitContent。 */
+  viewBox?: ViewRect
+}
+
+/** 两个矩形求并集。 */
+function unionRect(a: ViewRect, b: ViewRect): ViewRect {
+  const x = Math.min(a.x, b.x)
+  const y = Math.min(a.y, b.y)
+  return {
+    x,
+    y,
+    width: Math.max(a.x + a.width, b.x + b.width) - x,
+    height: Math.max(a.y + a.height, b.y + b.height) - y,
+  }
+}
+
+/**
+ * 计算场景实际渲染的 view 矩形。
+ *
+ * 抽成独立函数是因为「导出时的可见范围」在多处需要保持一致：
+ * SVG 渲染、PNG 光栅化、以及导出工具返回的 width/height 都基于它。
+ */
+export function sceneViewRect(
+  scene: Scene,
+  routed: {
+    routedEdges: { el?: SceneElement; routed: RoutedEdge }[]
+    labelPlacements?: Map<string, { text: string; x: number; y: number }>
+  },
+  opts: RenderOptions = {},
+): ViewRect {
+  const canvas: ViewRect = { x: 0, y: 0, width: scene.width, height: scene.height }
+  if (opts.viewBox) return opts.viewBox
+  if (!opts.fitContent) return canvas
+
+  let minX = canvas.x
+  let minY = canvas.y
+  let maxX = canvas.x + canvas.width
+  let maxY = canvas.y + canvas.height
+  const PAD = opts.contentPadding ?? 24
+  // 只把「超出画布的部分」纳入 view：直线/贝塞尔控制点/圆弧端点都要算进来，
+  // 否则回边绕到节点包围盒外侧的那一段仍会被裁掉。
+  const eat = (x: number, y: number) => {
+    if (!Number.isFinite(x) || !Number.isFinite(y)) return
+    minX = Math.min(minX, x - PAD)
+    minY = Math.min(minY, y - PAD)
+    maxX = Math.max(maxX, x + PAD)
+    maxY = Math.max(maxY, y + PAD)
+  }
+  for (const el of scene.elements) {
+    if (el.type === 'edge') continue
+    eat(el.x, el.y)
+    eat(el.x + el.width, el.y + el.height)
+    if (el.type === 'line' || el.type === 'arrow' || el.type === 'draw') {
+      const pts = (el.data as { points?: unknown } | undefined)?.points
+      if (Array.isArray(pts)) {
+        for (const p of pts) {
+          if (Array.isArray(p) && p.length >= 2) eat(Number(p[0]), Number(p[1]))
+        }
+      }
+    }
+  }
+  for (const { routed: re } of routed.routedEdges) {
+    for (const p of re.points) eat(p.x, p.y)
+    for (const m of re.pathD.matchAll(/([MLCA])([^MLCA]*)/g)) {
+      const nums = (m[2].match(/-?\d+(?:\.\d+)?/g) ?? []).map(Number).filter(Number.isFinite)
+      if (m[1] === 'A') {
+        if (nums.length >= 7) eat(nums[nums.length - 2], nums[nums.length - 1])
+        continue
+      }
+      for (let i = 0; i + 1 < nums.length; i += 2) eat(nums[i], nums[i + 1])
+    }
+  }
+  // 边标签：渲染时会围绕锚点做防重叠偏移，可能被推到路径之外（右侧走廊常见）。
+  // 不把标签算进来，长标签的右半边就会在 viewBox 外被裁掉。
+  for (const lp of routed.labelPlacements?.values() ?? []) {
+    eat(lp.x, lp.y - 13)
+    eat(lp.x + Math.min(160, lp.text.length * 7.5 + 12), lp.y + 5)
+  }
+  // 内容本来就在画布内时，view 与画布完全一致（不产生额外留白/改变输出）
+  return unionRect(canvas, { x: minX, y: minY, width: maxX - minX, height: maxY - minY })
 }
 
 /**
@@ -241,16 +338,39 @@ export function routeSceneEdges(scene: Scene) {
     })
     .filter((x): x is { el: EdgeElement; routed: RoutedEdge } => x !== null)
 
-  // 标签防重叠：围绕锚点尝试偏移（右/下/上/左，逐级放大），取第一个不碰撞的位置
+  // 标签防重叠：围绕锚点尝试偏移（右/下/上/左，逐级放大），取第一个不碰撞的位置。
+  //
+  // 关键：锚点 y 是 **SVG 文字基线**，字形实际落在基线【上方】。若碰撞盒按
+  // y..y+H 计算（基线往下），盒子的位置会比真实字形低约一个 ascent，
+  // 于是「检测为空白」的位置其实压在了节点上 —— 实测边标签会落进菱形内部。
+  // 这里按 13px 字号的 ascent(≈0.8em) / descent(≈0.2em) 反推真实盒子。
+  const FONT = 13
+  const ASCENT = FONT * 0.8
+  const DESCENT = FONT * 0.2
   const labelW = (t: string) => Math.min(160, t.length * 7.5 + 12)
-  const LABEL_H = 18
+  const LABEL_H = ASCENT + DESCENT
   const placed: { x: number; y: number; w: number; h: number }[] = []
   for (const lp of labelPlacements.values()) {
     const w = labelW(lp.text)
     const baseX = lp.x
     const baseY = lp.y
-    const steps = [0, 12, 24, 40, 60, 84, 110]
+    // 失衡代价：越远的位置越差（避免把标签甩到很远的地方）
+    const hit = (c: { x: number; y: number }): number => {
+      const box = { x: c.x, y: c.y - ASCENT, w, h: LABEL_H }
+      let n = 0
+      for (const p of placed) {
+        if (box.x < p.x + p.w && box.x + box.w > p.x && box.y < p.y + p.h && box.y + box.h > p.y) n++
+      }
+      for (const r of nodeRects) {
+        if (box.x < r.x + r.width && box.x + box.w > r.x && box.y < r.y + r.height && box.y + box.h > r.y) n += 4
+      }
+      return n
+    }
+    // 候选半径逐级放大；近距离优先，找不到无冲突位置时取冲突最少的一处。
+    const steps = [0, 12, 20, 30, 44, 60, 84, 110, 140, 180]
     let chosen: { x: number; y: number } | null = null
+    let best: { x: number; y: number } | null = null
+    let bestScore = Infinity
     outer: for (let i = 0; i < steps.length; i++) {
       const r = steps[i]
       const candidates = [
@@ -262,39 +382,44 @@ export function routeSceneEdges(scene: Scene) {
         { x: baseX - r * 0.7, y: baseY + r * 0.7 },
       ]
       for (const c of candidates) {
-        const box = { x: c.x, y: c.y, w, h: LABEL_H }
-        const hitLabel = placed.some(
-          (p) => box.x < p.x + p.w && box.x + box.w > p.x && box.y < p.y + p.h && box.y + box.h > p.y,
-        )
-        const hitNode = nodeRects.some(
-          (n) => box.x < n.x + n.width && box.x + box.w > n.x && box.y < n.y + n.height && box.y + box.h > n.y,
-        )
-        if (!hitLabel && !hitNode) {
+        const score = hit(c)
+        // 同分时偏好「离锚点更近、且不往负方向跑」的位置
+        const weighted = score * 1000 + r + (c.x < 0 ? 400 : 0) + (c.y - ASCENT < 0 ? 400 : 0)
+        if (weighted < bestScore) {
+          bestScore = weighted
+          best = c
+        }
+        if (score === 0) {
           chosen = c
           break outer
         }
       }
     }
-    if (!chosen) chosen = { x: baseX + 12, y: baseY + 12 } // 兜底
-    placed.push({ x: chosen.x, y: chosen.y, w, h: LABEL_H })
-    lp.x = chosen.x
-    lp.y = chosen.y
+    const finalPos = chosen ?? best ?? { x: baseX + 12, y: baseY + 12 }
+    placed.push({ x: finalPos.x, y: finalPos.y - ASCENT, w, h: LABEL_H })
+    lp.x = finalPos.x
+    lp.y = finalPos.y
   }
 
   return { nodeById, nodeRects, frameNodes, edgeEls, routedEdges, labelPlacements }
 }
 
-export function renderSceneSvg(scene: Scene, _opts: RenderOptions = {}): string {
+export function renderSceneSvg(scene: Scene, opts: RenderOptions = {}): string {
   const usePaper = scene.paper !== false
   const bg = usePaper ? '#faf9f4' : scene.background_color || '#ffffff'
   const defs = usePaper
     ? `<radialGradient id="vg" cx="50%" cy="42%" r="80%"><stop offset="0%" stop-color="rgba(0,0,0,0)"/><stop offset="100%" stop-color="rgba(120,110,80,0.10)"/></radialGradient>`
     : ''
 
-  const { nodeById, routedEdges, labelPlacements } = routeSceneEdges(scene)
+  const routed = routeSceneEdges(scene)
+  const { nodeById, routedEdges, labelPlacements } = routed
+
+  // 可见范围：默认严格等于画布；fitContent/viewBox 时扩到内容包围盒，
+  // 让落在画布外的元素也能被看见，而不是被静默裁掉。
+  const view = sceneViewRect(scene, routed, opts)
 
   const body: string[] = []
-  if (usePaper) body.push(Svg.rect(0, 0, scene.width, scene.height, { fill: bg }))
+  if (usePaper) body.push(Svg.rect(view.x, view.y, view.width, view.height, { fill: bg }))
   body.push(
     Svg.g(
       { id: 'paint' },
@@ -306,9 +431,13 @@ export function renderSceneSvg(scene: Scene, _opts: RenderOptions = {}): string 
       }).filter(Boolean),
     ),
   )
-  if (usePaper) body.push(Svg.rect(0, 0, scene.width, scene.height, { fill: 'url(#vg)' }))
+  if (usePaper) body.push(Svg.rect(view.x, view.y, view.width, view.height, { fill: 'url(#vg)' }))
 
-  return Svg.doc(scene.width, scene.height, body, { defs, background: usePaper ? undefined : bg })
+  const viewBox =
+    view.x === 0 && view.y === 0 && view.width === scene.width && view.height === scene.height
+      ? undefined
+      : `${num(view.x)} ${num(view.y)} ${num(view.width)} ${num(view.height)}`
+  return Svg.doc(view.width, view.height, body, { defs, background: usePaper ? undefined : bg, viewBox })
 }
 
 /** 与 renderEdge 相同，但标签位置由场景级碰撞检测结果决定。 */

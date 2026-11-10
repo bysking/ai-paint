@@ -12,10 +12,11 @@ import type { ShapeType } from '../core/shapes.js'
 import { SHAPE_TYPES } from '../core/shapes.js'
 import { DEF_COLUMN_GAP, DEF_ROW_GAP, type LayoutKind, type LayoutOptions } from '../core/layout.js'
 import { fitSceneContent } from '../core/fit.js'
+import { runLayoutGate } from '../core/layout-check.js'
 import type { SceneStore } from '../mcp/store.js'
 import type { ToolRegistry } from './registry.js'
 import { bool, clampNum, intNum, str } from './validators.js'
-import { drawFlowScene } from './draw.js'
+import { drawFlowScene, drawDiagramTitle } from './draw.js'
 
 /** 把旧式 nodes（key/label/shape）转成 perf.md 契约（name/description/type）。 */
 function nodesToPlan(raw: unknown): unknown {
@@ -125,6 +126,7 @@ export function registerDiagramTools(reg: ToolRegistry, store: SceneStore): void
           type: 'array',
           description: '[{ source, target, label?, type? (straight/orthogonal/bezier/smooth/arc), dashed? }]',
         },
+        title: { type: 'string', description: '图标题（可选），绘制在图形上方。' },
         kind: { type: 'string', enum: ['layered', 'tree', 'grid', 'circular'], description: '布局类型。默认 layered。' },
         column_gap: { type: 'number' },
         row_gap: { type: 'number' },
@@ -134,6 +136,15 @@ export function registerDiagramTools(reg: ToolRegistry, store: SceneStore): void
         stroke_width: { type: 'number', description: '描边粗细 1|2|4。默认 2。' },
         roughness: { type: 'number', description: '手绘抖动 0..2。默认 1。' },
         label_stroke_color: { type: 'string', description: '节点文字描边色。默认 "#ffffff" 白描边；传 "none" 关闭。' },
+        layout_check: {
+          type: 'boolean',
+          description:
+            '绘制前的布局检测（默认 true）：检查节点重叠/间距/连线穿节点/孤立节点/填充率，通过后才开始绘制。返回结果里的 layoutCheck 字段给出问题清单。',
+        },
+        auto_fix_layout: {
+          type: 'boolean',
+          description: '检测到布局问题时自动修复（分轴推挤节点、收拢孤立节点、贴合内容重算画布）。默认 true。',
+        },
         clear_existing: { type: 'boolean', description: '先清空场景。默认 false。' },
       },
       required: ['scene', 'nodes', 'edges'],
@@ -143,26 +154,41 @@ export function registerDiagramTools(reg: ToolRegistry, store: SceneStore): void
       const sceneName = str(args.scene, 'default')
       const nodes = nodesToPlan(args.nodes)
       const edges = edgesToPlan(args.edges)
-      const { plan } = await planDiagram(nodes, edges, {
+      const { plan, fromCache } = await planDiagram(nodes, edges, {
         ...layoutOptsFromArgs(args),
         name: sceneName,
       })
       const scene = store.getOrCreate(sceneName)
       if (bool(args.clear_existing, false)) scene.elements = []
-      scene.width = Math.max(scene.width, plan.sceneWidth)
-      scene.height = Math.max(scene.height, plan.sceneHeight)
+
+      // ---- 绘制前的布局优化 / 检测（通过后才开始绘制） ----
+      const gate = runLayoutGate(plan, {
+        enabled: bool(args.layout_check, true),
+        repair: bool(args.auto_fix_layout, true),
+      })
+
+      // 画布尺寸**取规划尺寸**，不再沿用场景的旧画布。
+      //
+      // 这里曾是 2400×1600 默认画布的残留：`Math.max(scene.width, plan.sceneWidth)`
+      // 对窄高的流程图（10 节点纵向 320×1470）会保留 2400×1600，
+      // 图上只剩 4% 填充率的空白。画布贴合内容由下面的 fitSceneContent 收尾，
+      // 因此这里直接采用规划尺寸即可（清空重绘时旧尺寸没有任何意义）。
+      scene.width = plan.sceneWidth
+      scene.height = plan.sceneHeight
 
       const strokeWidth = intNum(args.stroke_width, 'stroke_width', 1, 8, 2)
       const roughness = clampNum(args.roughness, 'roughness', 0, 2, 1)
       const labelStroke = str(args.label_stroke_color, '#ffffff')
 
-      const { nodeIds, shapes } = drawFlowScene(scene, plan, {
+      const { nodeIds } = drawFlowScene(scene, plan, {
         strokeWidth,
         roughness,
         labelStrokeColor: labelStroke,
       })
+      // 图标题（可选）：在图形之上绘制并把内容下移让位
+      drawDiagramTitle(scene, str(args.title) || undefined)
 
-      // 内容居中
+      // 内容居中：画布尺寸 = 内容包围盒 + 2×padding（不再保留旧的 2400×1600 空白）
       const { width, height, dx, dy } = fitSceneContent(scene, { padding: 60 })
       scene.width = width
       scene.height = height
@@ -175,8 +201,11 @@ export function registerDiagramTools(reg: ToolRegistry, store: SceneStore): void
         sceneHeight: scene.height,
         layoutKind: plan.kind,
         fingerprint: plan.fingerprint,
+        fromCache,
         collisionFixes: plan.collisionFixes,
         removedSelfLoops: plan.removedSelfLoops,
+        // 布局闸门：是否通过、发现的问题、实际做过的修复
+        layoutCheck: gate,
         nodes: Object.fromEntries(
           Object.entries(nodeIds).map(([k, id]) => [
             k,

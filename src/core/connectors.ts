@@ -112,10 +112,22 @@ function routeOrthogonalAvoid(
   toSide?: Side,
   minBends = 0,
   channelShift = 0,
+  /** 已占用的水平通道（y 值）。同一走廊里已被别的边走掉的通道要避开。 */
+  usedChannels?: Set<number>,
 ): Point[] {
   const obs = obstacles.filter((n) => !excludeKeys.includes(n.key))
-  const blocked = (a: Point, b: Point) =>
-    obs.some((n) => segmentIntersectsRect(a, b, n))
+  const blocked = (a: Point, b: Point): boolean => {
+    if (obs.some((n) => segmentIntersectsRect(a, b, n))) return true
+    // 水平段与已占通道共线 → 视为阻塞，迫使本条边走另一条通道。
+    // 这是「同层内多条回环线挤在同一条 y 上」的解药：障碍候选通道往往只有
+    // 一个可用值，不记录占用的话每条边都会选中同一个。
+    if (!usedChannels || usedChannels.size === 0) return false
+    if (Math.abs(a.y - b.y) > 0.5) return false // 只检查水平段
+    for (const y of usedChannels) {
+      if (Math.abs(a.y - y) < EDGE_SPACING * 0.8) return true
+    }
+    return false
+  }
 
   const preferVert = fromSide === 'top' || fromSide === 'bottom'
   const preferHoriz = fromSide === 'left' || fromSide === 'right'
@@ -163,6 +175,17 @@ function routeOrthogonalAvoid(
   // 对每个候选通道 y：检查 from→(x,y) 竖直段、水平段 (fromX→toX at y)、
   // (to.x,y)→to 竖直段 是否都避开障碍；
   // 排序优先"贴近终点行"的通道（= 最短路径优先，避免绕远到模块上方）
+  // 候选通道两侧再各扩若干个「梯形」偏移：同一走廊的第 2、3 条边需要紧邻的
+  // 备选通道。只靠障碍物上/下 ±gap 往往只产生一个可行值，扩出一系列平行值
+  // 才能让每条边各占一条。
+  const baseY = [...candidatesY]
+  for (const y of baseY) {
+    for (let k = 1; k <= 6; k++) {
+      candidatesY.add(y + EDGE_SPACING * k)
+      candidatesY.add(y - EDGE_SPACING * k)
+    }
+  }
+
   const dirX = to.x > from.x ? 1 : -1
   const channelScoreY = (y: number) => Math.abs(y - to.y)
   for (const y of [...candidatesY].sort((a, b) => channelScoreY(a) - channelScoreY(b))) {
@@ -622,12 +645,6 @@ export function routeAcrossLayers(
   const gapSpan = enterY - exitY
   if (gapSpan < 48) return undefined // 空隙太窄，退化为直线
 
-  // 通道在中线附近按序号错开，避免多条边的水平段叠成一束。
-  // 限制在 [exitY+layerInset, enterY-layerInset] 内，保证水平段不压任何层框边框。
-  const usable = Math.max(0, gapSpan / 2 - layerInset - 8)
-  const shift = Math.max(-usable, Math.min(usable, channel * EDGE_SPACING))
-  const midY = Math.max(exitY + layerInset, Math.min(enterY - layerInset, exitY + gapSpan / 2 + shift))
-
   const start = pullOut({ x: startX, y: upperMod.y + upperMod.height }, 'bottom', END_GAP)
   const end = pullOut({ x: endX, y: lowerMod.y }, 'top', END_GAP)
 
@@ -649,6 +666,7 @@ export function routeAcrossLayers(
       { x: startX, y: l.y + l.height - layerInset },
     )
   }
+
   // 水平位移必须落在「最后一个中间层框的底边 [之外 layerInset]」与
   // 「目标层框顶边内侧」之间，否则会压在中间层框的边框上（实测 y 正好等于框底边）。
   const lastLayerBottom = between.length
@@ -656,15 +674,48 @@ export function routeAcrossLayers(
     : upperLayer.y + upperLayer.height
   const minShiftY = lastLayerBottom + layerInset
   const maxShiftY = enterY - layerInset
-  // 若中间层框与目标框之间放不下位移段，说明层间距不足：
-  // 此时把位移段放到最后一个中间层框【内部】靠下的位置（仍保持内缩），
-  // 而不是压到边框上。
-  const shiftY =
-    minShiftY <= maxShiftY
-      ? Math.max(minShiftY, Math.min(maxShiftY, midY))
-      : lastLayerBottom - layerInset
-  raw.push({ x: startX, y: shiftY }, { x: endX, y: shiftY }, { x: endX, y: enterY }, end)
 
+  // 层间距不足、放不下位移段时：贴最后一个中间层框的内侧，而不是压到边框上。
+  if (minShiftY > maxShiftY) {
+    const shiftY = lastLayerBottom - layerInset
+    raw.push({ x: startX, y: shiftY }, { x: endX, y: shiftY }, { x: endX, y: enterY }, end)
+    return finish(raw, fromIsAbove)
+  }
+
+  // ---- 通道分配 ----
+  //
+  // 水平位移段【必须】落在 [minShiftY, maxShiftY] 这个窗口内：窗口上方是中间
+  // 层框、下方是目标层框，两者都不能压。此前的做法是先把 channel 偏移应用到
+  // 走廊中线 midY，再用 clamp 夹进窗口 —— 一旦窗口完全偏离中线（跨中间层的
+  // 走廊就是这样：窗口在中间层【下方】，中线却在中间层【内部】），所有边都被
+  // 夹到同一个边界值，6 条线叠成 1 条（实测 y=1216 上挤了 6 条水平线）。
+  //
+  // 正确做法：通道偏移直接在【窗口内】分配。
+  //   - 窗口够宽：以窗口中点为基准，按 channel 上下错开 EDGE_SPACING
+  //   - 窗口窄于通道总高：退回等距均分，保证至少不重合
+  const windowH = maxShiftY - minShiftY
+  let shiftY: number
+  if (windowH >= EDGE_SPACING) {
+    // 窗口够宽：以窗口中点为基准按 channel 上下错开。
+    // channel 可能是 0.5 的倍数（装箱时对称展开的结果），按比例缩放到窗口高度，
+    // 保证不管有几个通道，都能铺满整个窗口而不越界。
+    const mid = (minShiftY + maxShiftY) / 2
+    const half = windowH / 2 - layerInset / 2
+    // 用 EDGE_SPACING 做步长，但不超过窗口可用的半高
+    const step = Math.min(EDGE_SPACING, half)
+    shiftY = Math.max(minShiftY, Math.min(maxShiftY, mid + channel * step))
+  } else {
+    // 窗口很窄：按 channel 的符号贴住上/下边界，交替分配（0 → 中，±→ 上下）
+    if (channel === 0) shiftY = (minShiftY + maxShiftY) / 2
+    else if (channel < 0) shiftY = minShiftY
+    else shiftY = maxShiftY
+  }
+  raw.push({ x: startX, y: shiftY }, { x: endX, y: shiftY }, { x: endX, y: enterY }, end)
+  return finish(raw, fromIsAbove)
+}
+
+/** 收尾：去重相邻点，并按下→上方向还原。 */
+function finish(raw: Point[], fromIsAbove: boolean): Point[] {
   // 起终点 x 相同时中段退化为零长度，过滤掉重复点
   const pts = raw.filter((p, i) => {
     if (i === 0) return true
@@ -836,6 +887,12 @@ export function routeEdge(
     absToX?: number
     /** 架构图全部层框（跨多层连线时用于避开中间层） */
     allLayers?: { x: number; y: number; width: number; height: number }[]
+    /** 层间走廊内的通道序号（层感知路由用）。
+     *  必须按「走廊」全局分配，不能用 slotTo —— slotTo 是按目标节点分组的，
+     *  不同目标的边都从 0 开始，会在同一条走廊里拿到相同的 y 而重合。 */
+    layerChannel?: number
+    /** 同一走廊内已被其它边占用的水平通道 y（同层回环线用）。 */
+    usedChannels?: Set<number>
   } = {},
 ): RoutedEdge {
   const type = cfg.type ?? 'straight'
@@ -925,7 +982,8 @@ export function routeEdge(
   // 连线必须在框与框之间的空隙里完成水平位移。
   if (cfg.fromLayer || cfg.toLayer) {
     // slotFrom/slotTo 让同源扇出、同目标汇入的边在模块边上错开锚点；
-    // slotTo 同时充当层间空隙的通道序号（汇入同一目标的边天然需要错开）。
+    // 层间空隙的通道序号用 layerChannel（按走廊全局分配），
+    // 不能用 slotTo —— 它按目标节点分组，不同目标的边会拿到相同通道 y 而重合。
     const layered = routeAcrossLayers(
       from,
       to,
@@ -933,7 +991,7 @@ export function routeEdge(
       cfg.toLayer,
       cfg.slotFrom ?? 0,
       cfg.slotTo ?? 0,
-      cfg.slotTo ?? 0,
+      cfg.layerChannel ?? 0,
       cfg.absFromX,
       cfg.absToX,
       cfg.allLayers,
@@ -1047,7 +1105,17 @@ export function routeEdge(
 
   if (type === 'orthogonal') {
     const exclude = [from.key, to.key]
-    points = routeOrthogonalAvoid(fromP, toP, cfg.obstacles ?? [], exclude, fromSide, toSide, effMinBends, cfg.channelShift ?? 0)
+    points = routeOrthogonalAvoid(
+      fromP,
+      toP,
+      cfg.obstacles ?? [],
+      exclude,
+      fromSide,
+      toSide,
+      effMinBends,
+      cfg.channelShift ?? 0,
+      cfg.usedChannels,
+    )
     // 强制 U/Z 型（minBends≥1）但正交路由只能产出退化路径 → 兜底。
     //
     // 关键：退化路径分两种情况，退化的原因不同，处理也必须不同 ——

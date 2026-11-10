@@ -5,6 +5,7 @@
  */
 
 import { centerScene } from '../core/fit.js'
+import { checkSceneLayout } from '../core/layout-check.js'
 import type { SceneStore } from '../mcp/store.js'
 import type { ToolRegistry } from './registry.js'
 import { bool, intNum, str } from './validators.js'
@@ -42,6 +43,11 @@ export function registerArchTools(reg: ToolRegistry, store: SceneStore): void {
           description:
             '默认连线类型（单条 link 的 type 优先）。曲线只在层框之间的空隙里弯曲，不会穿过或贴住层框边框。默认 orthogonal。',
         },
+        layout_check: {
+          type: 'boolean',
+          description: '绘制后的布局检测（默认 true）：检查元素是否越出画布、场景是否为空，结果放在 layoutCheck 字段。',
+        },
+        auto_fix_layout: { type: 'boolean', description: '检测到越界时自动扩画布（不移动已绘制元素）。默认 true。' },
         clear_existing: { type: 'boolean', description: '先清空场景。默认 false。' },
       },
       required: ['scene', 'layers', 'links'],
@@ -97,6 +103,9 @@ export function registerArchTools(reg: ToolRegistry, store: SceneStore): void {
       )
 
       centerScene(scene, { padding: 60 })
+      const gate = bool(args.layout_check, true)
+        ? checkSceneLayout(scene, { repair: bool(args.auto_fix_layout, true) })
+        : { ok: true, issues: [], repairs: [] as string[], width: scene.width, height: scene.height }
       store.update(scene)
 
       const layerOut = Object.fromEntries(
@@ -125,6 +134,7 @@ export function registerArchTools(reg: ToolRegistry, store: SceneStore): void {
         elementCount: scene.elements.length,
         width: scene.width,
         height: scene.height,
+        layoutCheck: gate,
         layers: layerOut,
       }
     },

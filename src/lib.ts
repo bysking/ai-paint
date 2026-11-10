@@ -26,8 +26,8 @@ export type {
 } from './core/scene.js'
 
 // SVG 渲染
-export { renderSceneSvg } from './core/render.js'
-export type { RenderOptions } from './core/render.js'
+export { renderSceneSvg, sceneViewRect } from './core/render.js'
+export type { RenderOptions, ViewRect } from './core/render.js'
 
 // Excalidraw 导出
 export { sceneToExcalidraw } from './core/excalidraw.js'
@@ -91,9 +91,20 @@ export type { DrawStyle, FlowSceneResult } from './tools/draw.js'
 export { exportSceneFiles } from './tools/pipeline-tools.js'
 export type { ExportResult, ExportFormat } from './tools/pipeline-tools.js'
 
-// 场景居中
-export { fitSceneContent, centerScene, contentBounds } from './core/fit.js'
-export type { FitOptions } from './core/fit.js'
+// 场景居中 / 内容范围
+export {
+  fitSceneContent,
+  centerScene,
+  contentBounds,
+  elementBounds,
+  detectOverflow,
+  expandSceneToContent,
+} from './core/fit.js'
+export type { FitOptions, Bounds, SceneOverflow, Rect } from './core/fit.js'
+
+// 布局检测 / 优化（绘制前的质量闸门）
+export { checkAndRepairLayout, checkSceneLayout, runLayoutGate } from './core/layout-check.js'
+export type { LayoutIssue, LayoutCheckOptions, LayoutCheckResult, GateResult, IssueLevel } from './core/layout-check.js'
 
 // 形状几何
 export { shapeGeometry, SHAPE_TYPES } from './core/shapes.js'

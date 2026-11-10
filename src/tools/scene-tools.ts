@@ -4,6 +4,7 @@
 
 import { createElement, type Scene, type SceneElement } from '../core/scene.js'
 import { renderSceneSvg } from '../core/render.js'
+import { contentBounds, detectOverflow } from '../core/fit.js'
 import type { SceneStore } from '../mcp/store.js'
 import type { ToolRegistry } from './registry.js'
 import { bool, clampNum, intNum, str } from './validators.js'
@@ -186,13 +187,20 @@ export function registerSceneTools(reg: ToolRegistry, store: SceneStore): void {
       properties: {
         scene: { type: 'string', description: 'Scene name (required).' },
         path: { type: 'string', description: 'Output path (e.g. ./output/flow.svg). Default: <scene>.svg in cwd.' },
+        fit_content: {
+          type: 'boolean',
+          description: '按实际内容范围渲染（默认 true），画布外的元素不会被裁掉。设 false 则严格按画布矩形（越界内容会丢失）。',
+        },
       },
       required: ['scene'],
       additionalProperties: false,
     },
     handler: async (args) => {
       const scene = store.getOrCreate(str(args.scene))
-      const svg = renderSceneSvg(scene)
+      // 默认按内容范围渲染，画布外的元素不会被静默裁掉
+      const fitContent = bool(args.fit_content, true)
+      const svg = renderSceneSvg(scene, { fitContent })
+      const overflow = detectOverflow(scene)
       const { mkdirSync, writeFileSync } = await import('node:fs')
       const { join, dirname } = await import('node:path')
       const outPath = str(args.path) || join(process.cwd(), `${scene.name}.svg`)
@@ -203,7 +211,18 @@ export function registerSceneTools(reg: ToolRegistry, store: SceneStore): void {
         /* ignore */
       }
       writeFileSync(outPath, svg, 'utf8')
-      return { path: outPath, bytes: svg.length }
+      return {
+        path: outPath,
+        bytes: svg.length,
+        clipped: !fitContent && overflow.overflow,
+        warnings: overflow.overflow
+          ? [
+              fitContent
+                ? `内容超出画布 ${scene.width}×${scene.height}，已按实际内容范围渲染（未裁切）。`
+                : `内容超出画布 ${scene.width}×${scene.height}，超出部分已被裁掉（fit_content=false）。`,
+            ]
+          : undefined,
+      }
     },
   })
 
@@ -221,13 +240,19 @@ export function registerSceneTools(reg: ToolRegistry, store: SceneStore): void {
           type: 'boolean',
           description: '是否同时生成可编辑的 .excalidraw 文件（Excalidraw v2，excalidraw.com 可打开编辑）。默认 true。',
         },
+        fit_content: {
+          type: 'boolean',
+          description: '按实际内容范围渲染（默认 true），画布外的元素不会被裁掉。设 false 则严格按画布矩形（越界内容会丢失）。',
+        },
       },
       required: ['scene'],
       additionalProperties: false,
     },
     handler: async (args) => {
       const scene = store.getOrCreate(str(args.scene))
-      const svg = renderSceneSvg(scene)
+      const fitContent = bool(args.fit_content, true)
+      const svg = renderSceneSvg(scene, { fitContent })
+      const overflow = detectOverflow(scene)
       const { Resvg } = await import('@resvg/resvg-js')
       const scale = clampNum(args.scale, 'scale', 0.25, 8, 2)
       const resvg = new Resvg(svg, { fitTo: { mode: 'zoom', value: scale } })
@@ -257,11 +282,31 @@ export function registerSceneTools(reg: ToolRegistry, store: SceneStore): void {
         excalidrawBytes = json.length
       }
 
+      // 真实导出尺寸取自 SVG 的 viewBox（fitContent 生效时可能大于画布）
+      let viewW = scene.width
+      let viewH = scene.height
+      const vb = svg.match(/viewBox="([^"]+)"/)
+      if (vb) {
+        const nums = vb[1].trim().split(/\s+/).map(Number)
+        if (nums.length === 4 && nums.every(Number.isFinite)) {
+          viewW = nums[2]
+          viewH = nums[3]
+        }
+      }
+
       return {
         path: outPath,
         bytes: png.length,
-        width: scene.width * scale,
-        height: scene.height * scale,
+        width: Math.round(viewW * scale),
+        height: Math.round(viewH * scale),
+        clipped: !fitContent && overflow.overflow,
+        warnings: overflow.overflow
+          ? [
+              fitContent
+                ? `内容超出画布 ${scene.width}×${scene.height}，已按实际内容范围渲染（未裁切）。`
+                : `内容超出画布 ${scene.width}×${scene.height}，超出部分已被裁掉（fit_content=false）。`,
+            ]
+          : undefined,
         excalidrawPath,
         excalidrawBytes,
       }
@@ -327,6 +372,10 @@ function summarize(scene: Scene): Record<string, unknown> {
   for (const el of scene.elements) {
     byType[el.type] = (byType[el.type] ?? 0) + 1
   }
+  // 内容范围 + 是否越出画布：调用方据此判断「当前画布是否包住了内容」，
+  // 而不是等到导出后才发现元素被裁掉（白图不报错）。
+  const bounds = contentBounds(scene)
+  const overflow = detectOverflow(scene)
   return {
     name: scene.name,
     width: scene.width,
@@ -335,5 +384,10 @@ function summarize(scene: Scene): Record<string, unknown> {
     paper: scene.paper,
     elementCount: scene.elements.length,
     elementsByType: byType,
+    contentBounds: bounds,
+    contentFitsCanvas: !overflow.overflow,
+    overflow: overflow.overflow
+      ? { left: overflow.left, top: overflow.top, right: overflow.right, bottom: overflow.bottom }
+      : undefined,
   }
 }

@@ -4,6 +4,7 @@
  */
 
 import { centerScene } from '../core/fit.js'
+import { checkSceneLayout } from '../core/layout-check.js'
 import type { SceneStore } from '../mcp/store.js'
 import type { ToolRegistry } from './registry.js'
 import { bool, str } from './validators.js'
@@ -30,6 +31,11 @@ export function registerSpecialDiagrams(reg: ToolRegistry, store: SceneStore): v
           description: '[{ from, to, label, dashed? (返回消息), self? (自消息) }]',
         },
         title: { type: 'string', description: '图标题（可选）。' },
+        layout_check: {
+          type: 'boolean',
+          description: '绘制后的布局检测（默认 true）：检查元素是否越出画布、场景是否为空，结果放在 layoutCheck 字段。',
+        },
+        auto_fix_layout: { type: 'boolean', description: '检测到越界时自动扩画布（不移动已绘制元素）。默认 true。' },
         clear_existing: { type: 'boolean', description: '先清空场景。默认 false。' },
       },
       required: ['scene', 'participants', 'messages'],
@@ -64,8 +70,18 @@ export function registerSpecialDiagrams(reg: ToolRegistry, store: SceneStore): v
       drawSequenceScene(scene, participants, messages, { title: str(args.title) || undefined })
 
       centerScene(scene, { padding: 60 })
+      // 绘制后的布局体检：确认画布真的包住了全部内容（否则导出会被裁）
+      const gate = bool(args.layout_check, true)
+        ? checkSceneLayout(scene, { repair: bool(args.auto_fix_layout, true) })
+        : { ok: true, issues: [], repairs: [] as string[], width: scene.width, height: scene.height }
       store.update(scene)
-      return { scene: scene.name, elementCount: scene.elements.length, width: scene.width, height: scene.height }
+      return {
+        scene: scene.name,
+        elementCount: scene.elements.length,
+        width: scene.width,
+        height: scene.height,
+        layoutCheck: gate,
+      }
     },
   })
 
@@ -86,6 +102,11 @@ export function registerSpecialDiagrams(reg: ToolRegistry, store: SceneStore): v
           type: 'array',
           description: '[{ from, to, fromCard?, toCard?, label?, type? (straight/orthogonal/bezier) }]',
         },
+        layout_check: {
+          type: 'boolean',
+          description: '绘制后的布局检测（默认 true）：检查元素是否越出画布、场景是否为空，结果放在 layoutCheck 字段。',
+        },
+        auto_fix_layout: { type: 'boolean', description: '检测到越界时自动扩画布（不移动已绘制元素）。默认 true。' },
         clear_existing: { type: 'boolean' },
       },
       required: ['scene', 'entities', 'relations'],
@@ -126,8 +147,17 @@ export function registerSpecialDiagrams(reg: ToolRegistry, store: SceneStore): v
       drawErScene(scene, entities, relations)
 
       centerScene(scene, { padding: 60 })
+      const gate = bool(args.layout_check, true)
+        ? checkSceneLayout(scene, { repair: bool(args.auto_fix_layout, true) })
+        : { ok: true, issues: [], repairs: [] as string[], width: scene.width, height: scene.height }
       store.update(scene)
-      return { scene: scene.name, elementCount: scene.elements.length, width: scene.width, height: scene.height }
+      return {
+        scene: scene.name,
+        elementCount: scene.elements.length,
+        width: scene.width,
+        height: scene.height,
+        layoutCheck: gate,
+      }
     },
   })
 }

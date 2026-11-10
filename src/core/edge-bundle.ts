@@ -519,6 +519,136 @@ export function routeEdgeBundle(
     }
   }
 
+  // ---- 3.6 层间走廊通道分配（架构图） ----
+  //
+  // 层间空隙里，每条连线都要有一段「水平位移」把 x 从源模块挪到目标模块。
+  // 若无统一分配，这段水平段会落在同一个 y 上直接重合（实测 mq->mysql 与
+  // mq->redis 都在 y=253，重叠 8px；cache->redis 与 job->mysql 都在 y=267）。
+  //
+  // 分组键 = 「源层框 y | 目标层框 y」= 一条走廊。同走廊内的边按水平跨度的
+  // 重叠关系贪心分层，互不重叠的边可共用同一通道（避免通道数爆炸）。
+  const layerChannel = new Map<number, number>()
+  {
+    type Rec = { idx: number; minX: number; maxX: number; tier: number }
+
+    /** 通道组：同一组内的通道 y 必须互不相同。
+     *
+     *  走廊键是「源层 y | 目标层 y」，但**不同源层可以共享同一段垂直空间**：
+     *  例如 gateway→service 与 auth→service 两条走廊，位移窗口都落在
+     *  auth 层底部与 service 层顶部之间 —— 它们算出的通道 y 会撞在一起
+     *  （实测 y=762 上同时有 rbac→user 和 gw→order）。
+     *  因此分组不能用走廊，而要用【位移窗口】= 最后中间层底边 | 目标层顶边。 */
+    const channelGroups = new Map<string, Rec[]>()
+    routed.forEach((r, i) => {
+      const fl = r.req.fromLayer
+      const tl = r.req.toLayer
+      if (!fl || !tl) return
+      if (r.req.from === r.req.to) return
+      // 同层或层框重合：不适用层间走廊
+      if (fl.x === tl.x && fl.y === tl.y && fl.width === tl.width) return
+      const fromAbove = fl.y + fl.height <= tl.y
+      const toAbove = tl.y + tl.height <= fl.y
+      if (!fromAbove && !toAbove) return
+
+      const fromMod = nodeMap.get(r.req.from)
+      const toMod = nodeMap.get(r.req.to)
+      if (!fromMod || !toMod) return
+      const [upperMod, lowerMod] = fromAbove ? [fromMod, toMod] : [toMod, fromMod]
+      const [upperLayer, lowerLayer] = fromAbove ? [fl, tl] : [tl, fl]
+      const [uSlot, lSlot] = fromAbove
+        ? [slotFrom.get(i) ?? 0, slotTo.get(i) ?? 0]
+        : [slotTo.get(i) ?? 0, slotFrom.get(i) ?? 0]
+      const anchorOf = (mod: ConnectorNode, slot: number) =>
+        Math.max(mod.x + EDGE_SPACING, Math.min(mod.x + mod.width - EDGE_SPACING, mod.x + mod.width / 2 + slot * EDGE_SPACING))
+      // 水平段的横向跨度：从上层模块的锚点 x 到下层模块的锚点 x
+      const ax = anchorOf(upperMod, uSlot)
+      const bx = anchorOf(lowerMod, lSlot)
+
+      // 按【位移窗口】分组（与 routeAcrossLayers 的窗口算法保持一致）：
+      //   窗口 = [最后中间层底边 + inset, 目标层顶边 - inset]
+      // 凡窗口相同的边，其水平段落在同一段垂直空间里，必须互斥分配通道。
+      const layerInset = 12
+      const exitY = upperLayer.y + upperLayer.height - layerInset
+      const enterY = lowerLayer.y + layerInset
+      const betweenBottom = (r.req.allLayers ?? [])
+        .filter((l) => l.y > exitY && l.y + l.height < enterY)
+        .filter((l) => !(l.x === upperLayer.x && l.y === upperLayer.y))
+        .reduce((m, l) => Math.max(m, l.y + l.height), upperLayer.y + upperLayer.height)
+      const key = `${Math.round(betweenBottom)}|${Math.round(enterY)}`
+      if (!channelGroups.has(key)) channelGroups.set(key, [])
+      channelGroups.get(key)!.push({ idx: i, minX: Math.min(ax, bx), maxX: Math.max(ax, bx), tier: 0 })
+    })
+
+    for (const recs of channelGroups.values()) {
+      // 通道数尽量少：按左端排序后贪心装箱，能塞进已有层就不新开通道。
+      //
+      // 判定「能否共用通道」用**端点间距**而不是「区间不相交」：
+      // 两条水平段 [409,861] 与 [623,861] 区间相交会被分到不同通道，
+      // 但 [0,100] 与 [300,861] 虽然不相交，右端却都收在 861 —— 视觉上仍是一
+      // 条贯穿的长线，只是中间断了一截，看起来像同一条线被打断。
+      // 所以只要横向跨度接近（共享端点或相距很近），就必须分到不同通道。
+      const MERGE_GAP = 40 // 两端至少错开这么多，才认为可以共用通道
+      const tiers: { maxX: number; minX: number }[] = []
+      recs.sort((a, b) => a.minX - b.minX)
+      for (const rec of recs) {
+        let placed = false
+        for (let t = 0; t < tiers.length; t++) {
+          const tier = tiers[t]
+          // 完全不重叠、且两端都留足余量 → 可以共用
+          if (rec.minX > tier.maxX + MERGE_GAP) {
+            tier.maxX = Math.max(tier.maxX, rec.maxX)
+            tier.minX = Math.min(tier.minX, rec.minX)
+            rec.tier = t
+            placed = true
+            break
+          }
+        }
+        if (!placed) {
+          tiers.push({ maxX: rec.maxX, minX: rec.minX })
+          rec.tier = tiers.length - 1
+        }
+      }
+      // 通道序号围绕中线对称展开：0, -1, +1, -2, +2 …
+      // 让整体视觉重心保持在走廊中央，而不是全部堆在中线下方。
+      const total = tiers.length
+      for (const rec of recs) {
+        const k = rec.tier
+        // total=1 → 0；total=2 → -0.5,+0.5；total=3 → -1,0,+1 …
+        const shift = total <= 1 ? 0 : k - (total - 1) / 2
+        layerChannel.set(rec.idx, shift)
+      }
+    }
+  }
+
+  // ---- 3.7 同层回环线的水平通道登记 ----
+  //
+  // 同一层内两个模块之间的连线（以及 A→B、B→A 这类来回线）会在模块上方/下方
+  // 绕行，而可用通道往往只有一个（障碍候选值有限），于是多条边共用同一条 y。
+  // 这里按「层框 y」分组维护已占通道，路由时把占用集合传下去，
+  // routeOrthogonalAvoid 会绕开这些 y。
+  const usedChannelsByLayer = new Map<string, Set<number>>()
+  const corridorOf = (i: number): string => {
+    const r = routed[i]
+    if (!r) return 'none'
+    const fl = r.req.fromLayer
+    const tl = r.req.toLayer
+    if (fl && tl && !(fl.x === tl.x && fl.y === tl.y)) return `${fl.y}|${tl.y}`
+    if (fl) return `same:${fl.y}`
+    if (tl) return `same:${tl.y}`
+    return 'none'
+  }
+  const usedChannelsFor = (i: number): Set<number> | undefined => {
+    const key = corridorOf(i)
+    // 跨层走廊（x|y 形式）的通道已由 layerChannel 统一分配，这里只处理同层回环
+    if (!key.startsWith('same:')) return undefined
+    let set = usedChannelsByLayer.get(key)
+    if (!set) {
+      set = new Set<number>()
+      usedChannelsByLayer.set(key, set)
+    }
+    return set
+  }
+
   // ---- 4. 最终路由 ----
   const allNodes = [...nodeMap.values()]
   const edges: (RoutedEdge & { key: string })[] = []
@@ -565,6 +695,10 @@ export function routeEdgeBundle(
       absFromX: absAnchor.get(i)?.out,
       absToX: absAnchor.get(i)?.in,
       allLayers: req.allLayers,
+      // 层间走廊通道序号（按走廊全局分配，避免不同目标的边共用同一条通道 y）
+      layerChannel: layerChannel.get(i) ?? 0,
+      // 同层回环线：把本走廊内已被占用的水平通道传下去，逼本条边换一条
+      usedChannels: usedChannelsFor(i),
       // 用预路由协调后的桩点（回边目标侧已选占用最少的侧）
       fromSide: r.fromSide,
       toSide: r.toSide,
@@ -574,6 +708,13 @@ export function routeEdgeBundle(
         (n) => n.key !== req.from && n.key !== req.to,
       ),
     })
+    // 登记本条边实际占用的水平通道，供同走廊后续的边避让
+    for (let k = 0; k < edge.points.length - 1; k++) {
+      const a = edge.points[k]
+      const b = edge.points[k + 1]
+      if (Math.abs(a.y - b.y) > 0.5 || Math.abs(a.x - b.x) <= 1) continue
+      usedChannelsFor(i)?.add(a.y)
+    }
     edges.push({ ...edge, key: `${req.from}->${req.to}` })
   })
 

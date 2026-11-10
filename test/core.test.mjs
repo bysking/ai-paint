@@ -1114,3 +1114,254 @@ test('架构图：linkType 可通过 ArchOptions 设为默认连线类型', () =
   const a3 = planArchitectureDiagram(layers, [{ from: 'a', to: 'b', type: 'arc' }], { linkType: 'bezier' })
   assert.equal(a3.links[0].type, 'arc', '单条 type 应优先')
 })
+
+// ---------------------------------------------------------------------------
+// 布局检测 / 优化闸门（绘制前）+ 导出越界守卫
+// ---------------------------------------------------------------------------
+
+test('runLayoutGate：重叠节点被推开，复检通过', async () => {
+  const { planDiagram } = await import('../dist/core/plan.js')
+  const { runLayoutGate } = await import('../dist/core/layout-check.js')
+  // 节点尺寸远大于布局间距 → 布局后必然重叠
+  const nodes = [
+    { name: 'A', width: 400, height: 300 },
+    { name: 'B', width: 400, height: 300 },
+    { name: 'C', width: 400, height: 300 },
+  ]
+  const edges = [
+    { source: 'A', target: 'B' },
+    { source: 'B', target: 'C' },
+  ]
+  const { plan } = await planDiagram(nodes, edges, { kind: 'layered', columnGap: 10, rowGap: 10 })
+
+  const gate = runLayoutGate(plan, { repair: true })
+  assert.equal(gate.ok, true, '修复后应当通过（无 error 级遗留问题）')
+  assert.ok(gate.repairs.length > 0, '应当记录修复动作')
+
+  const keys = Object.keys(plan.nodes)
+  for (let i = 0; i < keys.length; i++) {
+    for (let j = i + 1; j < keys.length; j++) {
+      const a = plan.nodes[keys[i]]
+      const b = plan.nodes[keys[j]]
+      const ox = Math.min(a.x + a.width, b.x + b.width) - Math.max(a.x, b.x)
+      const oy = Math.min(a.y + a.height, b.y + b.height) - Math.max(a.y, b.y)
+      assert.ok(ox <= 0 || oy <= 0, `节点 ${keys[i]} 与 ${keys[j]} 修复后仍重叠`)
+    }
+  }
+})
+
+test('runLayoutGate：关闭时原样返回（skip 标记）', async () => {
+  const { planDiagram } = await import('../dist/core/plan.js')
+  const { runLayoutGate } = await import('../dist/core/layout-check.js')
+  const { plan } = await planDiagram(
+    [{ name: 'A' }, { name: 'B' }],
+    [{ source: 'A', target: 'B' }],
+    { kind: 'layered' },
+  )
+  const gate = runLayoutGate(plan, { enabled: false })
+  assert.equal(gate.skipped, true)
+  assert.equal(gate.issues.length, 0)
+  assert.equal(gate.repairs.length, 0)
+})
+
+test('runLayoutGate：孤立节点被收拢到主内容一侧', async () => {
+  const { planDiagram } = await import('../dist/core/plan.js')
+  const { runLayoutGate } = await import('../dist/core/layout-check.js')
+  const { plan } = await planDiagram(
+    [{ name: 'A' }, { name: 'B' }, { name: '孤岛' }],
+    [{ source: 'A', target: 'B' }],
+    { kind: 'layered' },
+  )
+  const gate = runLayoutGate(plan, { repair: true })
+  const iso = gate.issues.find((i) => i.code === 'isolated-node')
+  assert.ok(iso, '应当报告孤立节点')
+  assert.ok(gate.repairs.some((r) => r.includes('孤立节点')), '应当记录孤立节点收拢')
+})
+
+test('detectOverflow：画布外元素被识别，画布内元素不误报', async () => {
+  const { blankScene, createElement } = await import('../dist/core/scene.js')
+  const { detectOverflow, expandSceneToContent } = await import('../dist/core/fit.js')
+
+  const scene = blankScene('of', 400, 300)
+  scene.elements.push(
+    createElement('shape', { id: 'inside', x: 10, y: 10, width: 100, height: 50, data: { shape: 'rectangle' } }),
+  )
+  let res = detectOverflow(scene)
+  assert.equal(res.overflow, false, '全部在画布内时不应报告越界')
+
+  scene.elements.push(
+    createElement('shape', { id: 'outside', x: 500, y: 600, width: 100, height: 50, data: { shape: 'rectangle' } }),
+  )
+  res = detectOverflow(scene)
+  assert.equal(res.overflow, true, '画布外元素应被识别')
+  assert.ok(res.elements.includes('outside'))
+  assert.ok(res.right > 0 && res.bottom > 0, `应给出右下越界量，实际 ${res.right}/${res.bottom}`)
+
+  const ex = expandSceneToContent(scene, { padding: 20 })
+  assert.equal(ex.expanded, true, '应当扩画布')
+  assert.ok(scene.width >= 620 && scene.height >= 670, `扩后画布应包住内容，实际 ${scene.width}×${scene.height}`)
+  assert.equal(detectOverflow(scene).overflow, false, '扩画布后不应再有越界')
+})
+
+test('renderSceneSvg：默认严格按画布，fitContent 时 viewBox 扩到内容', async () => {
+  const { blankScene, createElement } = await import('../dist/core/scene.js')
+  const { renderSceneSvg } = await import('../dist/core/render.js')
+
+  const scene = blankScene('vb', 400, 300)
+  scene.elements.push(
+    createElement('shape', { id: 'far', x: 500, y: 600, width: 100, height: 50, data: { shape: 'rectangle' } }),
+  )
+
+  const strict = renderSceneSvg(scene)
+  assert.ok(strict.includes('viewBox="0 0 400 300"'), '默认 viewBox 应严格等于画布')
+
+  const fitted = renderSceneSvg(scene, { fitContent: true })
+  const m = fitted.match(/viewBox="([^"]+)"/)
+  assert.ok(m, '应有 viewBox')
+  const [, , w, h] = m[1].trim().split(/\s+/).map(Number)
+  assert.ok(w >= 600 && h >= 650, `fitContent 后 view 应包住远距离元素，实际 ${w}×${h}`)
+  assert.ok(fitted.includes('id="far"'), '画布外元素仍应出现在 SVG 里（不被裁掉）')
+})
+
+test('画布贴合内容：不再保留 2400×1600 默认空白', async () => {
+  const { planDiagram } = await import('../dist/core/plan.js')
+  const { blankScene } = await import('../dist/core/scene.js')
+  const { drawFlowScene } = await import('../dist/tools/draw.js')
+  const { fitSceneContent } = await import('../dist/core/fit.js')
+
+  // 10 节点纵向流程图：内容高但很窄
+  const nodes = Array.from({ length: 10 }, (_, i) => ({ name: `步骤 ${i + 1}` }))
+  const edges = Array.from({ length: 9 }, (_, i) => ({ source: `步骤 ${i + 1}`, target: `步骤 ${i + 2}` }))
+  const { plan } = await planDiagram(nodes, edges, { kind: 'layered', direction: 'TB' })
+
+  const scene = blankScene('fit', 2400, 1600)
+  // 模拟 create_flow_diagram 的正确做法：画布取规划尺寸
+  scene.width = plan.sceneWidth
+  scene.height = plan.sceneHeight
+  drawFlowScene(scene, plan)
+  const { width, height } = fitSceneContent(scene, { padding: 60 })
+
+  assert.ok(width < 800, `窄流程图不应保留宽画布，实际宽 ${width}`)
+  assert.ok(height > 1000, `10 节点纵向图应足够高，实际高 ${height}`)
+})
+
+// ---------------------------------------------------------------------------
+// 图标题 + 边标签避让
+// ---------------------------------------------------------------------------
+
+test('drawDiagramTitle：标题进入场景并位于内容上方', async () => {
+  const { blankScene, createElement } = await import('../dist/core/scene.js')
+  const { drawDiagramTitle, TITLE_SPACE } = await import('../dist/tools/draw.js')
+  const { fitSceneContent, contentBounds } = await import('../dist/core/fit.js')
+
+  const scene = blankScene('t')
+  scene.elements.push(
+    createElement('shape', { id: 'n1', x: 0, y: 0, width: 200, height: 72, data: { shape: 'rectangle' } }),
+  )
+  const before = scene.elements[0].y
+  assert.equal(drawDiagramTitle(scene, '我的流程图'), true)
+
+  const title = scene.elements.find((e) => e.type === 'text')
+  assert.ok(title, '应生成标题文本')
+  assert.equal(title.data.text, '我的流程图')
+  const shape = scene.elements.find((e) => e.id === 'n1')
+  assert.equal(shape.y, before + TITLE_SPACE, '已有内容应下移让位')
+  assert.ok(title.y < shape.y, '标题应在内容上方')
+
+  fitSceneContent(scene, { padding: 60 })
+  const b = contentBounds(scene)
+  assert.ok(b.minY >= 0, '居中后内容不应有负坐标')
+})
+
+test('drawDiagramTitle：空标题不产生元素', async () => {
+  const { blankScene } = await import('../dist/core/scene.js')
+  const { drawDiagramTitle } = await import('../dist/tools/draw.js')
+  const scene = blankScene('t2')
+  assert.equal(drawDiagramTitle(scene, '   '), false)
+  assert.equal(drawDiagramTitle(scene, undefined), false)
+  assert.equal(scene.elements.length, 0)
+})
+
+test('边标签不压节点：碰撞盒按文字基线（ascent）反推', async () => {
+  const { blankScene, createElement } = await import('../dist/core/scene.js')
+  const { routeSceneEdges } = await import('../dist/core/render.js')
+
+  // 两个纵向排列的节点 + 一条带标签的边。标签锚点若按「基线往下」算盒子，
+  // 检测会以为下方是空白，实际字形落在基线上方、压进节点里。
+  const scene = blankScene('lbl')
+  scene.elements.push(
+    createElement('shape', { id: 'a', x: 100, y: 100, width: 200, height: 80, data: { shape: 'rectangle' } }),
+    createElement('shape', { id: 'b', x: 100, y: 400, width: 200, height: 80, data: { shape: 'rectangle' } }),
+    createElement('edge', {
+      id: 'e1', x: 0, y: 0, width: 0, height: 0,
+      data: { from: 'a', to: 'b', edge_type: 'straight', label: '这是一个比较长的边标签' },
+    }),
+  )
+
+  const { labelPlacements, nodeRects } = routeSceneEdges(scene)
+  const lp = labelPlacements.get('e1')
+  assert.ok(lp, '应产出标签位置')
+
+  // 按渲染同款的字形盒（基线 y - ascent 起算）
+  const FONT = 13
+  const box = {
+    x: lp.x,
+    y: lp.y - FONT * 0.8,
+    w: Math.min(160, lp.text.length * 7.5 + 12),
+    h: FONT,
+  }
+  for (const n of nodeRects) {
+    const hit = box.x < n.x + n.width && box.x + box.w > n.x && box.y < n.y + n.height && box.y + box.h > n.y
+    assert.ok(!hit, `标签盒 ${JSON.stringify(box)} 不应与节点 ${JSON.stringify(n)} 重叠`)
+  }
+})
+
+test('架构图：同走廊的连线水平段不共线（通道按位移窗口互斥分配）', async () => {
+  const { planArchitectureDiagram } = await import('../dist/core/arch.js')
+
+  const layers = [
+    { key: 'client', label: '客户端层', modules: [{ key: 'web', label: 'Web' }, { key: 'app', label: 'App' }, { key: 'admin', label: '后台' }] },
+    { key: 'gateway', label: '接入层', modules: [{ key: 'cdn', label: 'CDN' }, { key: 'lb', label: 'LB' }, { key: 'gw', label: 'GW' }, { key: 'waf', label: 'WAF' }] },
+    { key: 'auth', label: '认证层', modules: [{ key: 'sso', label: 'SSO' }, { key: 'rbac', label: '权限' }, { key: 'token', label: '令牌' }] },
+    { key: 'service', label: '服务层', modules: [{ key: 'user', label: '用户' }, { key: 'order', label: '订单' }, { key: 'product', label: '商品' }, { key: 'pay', label: '支付' }] },
+  ]
+  const links = [
+    { from: 'web', to: 'cdn' }, { from: 'app', to: 'cdn' }, { from: 'admin', to: 'lb' },
+    { from: 'cdn', to: 'waf' }, { from: 'waf', to: 'lb' }, { from: 'lb', to: 'gw' },
+    { from: 'gw', to: 'sso' }, { from: 'sso', to: 'rbac' }, { from: 'sso', to: 'token' },
+    { from: 'rbac', to: 'user' },
+    { from: 'gw', to: 'user' }, { from: 'gw', to: 'order' }, { from: 'gw', to: 'product' }, { from: 'gw', to: 'pay' },
+    { from: 'order', to: 'pay' },
+  ]
+  const arch = planArchitectureDiagram(layers, links)
+
+  // 收集所有水平段；同 y 且 x 区间重叠 >= 8px 即视为「共线重合」
+  const segs = []
+  for (const l of arch.links) {
+    for (let i = 0; i < l.points.length - 1; i++) {
+      const a = l.points[i]
+      const b = l.points[i + 1]
+      if (Math.abs(a.y - b.y) > 0.5) continue
+      if (Math.abs(a.x - b.x) <= 1) continue
+      segs.push({ edge: `${l.from}->${l.to}`, y: a.y, lo: Math.min(a.x, b.x), hi: Math.max(a.x, b.x) })
+    }
+  }
+
+  const conflicts = []
+  for (let i = 0; i < segs.length; i++) {
+    for (let j = i + 1; j < segs.length; j++) {
+      if (Math.abs(segs[i].y - segs[j].y) > 0.5) continue
+      const ov = Math.min(segs[i].hi, segs[j].hi) - Math.max(segs[i].lo, segs[j].lo)
+      if (ov >= 8) {
+        conflicts.push(`y=${segs[i].y.toFixed(0)} 重叠${ov.toFixed(0)}px: ${segs[i].edge} ↔ ${segs[j].edge}`)
+      }
+    }
+  }
+  assert.deepEqual(conflicts, [], `架构图不应有共线重合的水平段：\n${conflicts.join('\n')}`)
+
+  // 同一走廊 4 条边（gw→user/order/product/pay）必须落在 4 个不同 y 上
+  const gwY = new Set(
+    segs.filter((s) => s.edge.startsWith('gw->')).map((s) => Math.round(s.y)),
+  )
+  assert.ok(gwY.size >= 3, `gw 的多条出边应有 >=3 个不同通道 y，实际 ${[...gwY].join(',')}`)
+})
