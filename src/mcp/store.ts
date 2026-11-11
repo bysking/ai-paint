@@ -16,8 +16,8 @@ export class SceneStore {
   private scenes = new Map<string, Scene>()
 
   constructor(opts: SceneStoreOptions = {}) {
+    // 目录在首次写入时才创建：仅启动 MCP 服务不应在 cwd 产生 .ai-paint/
     this.dir = opts.dir ?? join(process.cwd(), '.ai-paint')
-    mkdirSync(this.dir, { recursive: true })
   }
 
   private fileFor(name: string): string {
@@ -78,6 +78,7 @@ export class SceneStore {
 
   save(scene: Scene): void {
     try {
+      mkdirSync(this.dir, { recursive: true })
       writeFileSync(this.fileFor(scene.name), JSON.stringify(scene, null, 2), 'utf8')
     } catch (err) {
       console.error(`[ai-paint] failed to persist scene: ${(err as Error).message}`)

@@ -22,6 +22,7 @@ import {
 import { renderSceneSvg } from '../dist/core/render.js'
 import { blankScene } from '../dist/core/scene.js'
 import { drawFlowScene } from '../dist/tools/draw.js'
+import { SceneStore } from '../dist/mcp/store.js'
 
 // ---------- 归一化 ----------
 
@@ -227,6 +228,21 @@ test('PlanStore：写入→命中→删除', async () => {
     // 删除
     assert.ok(PlanStore.delete(fp), '删除成功')
     assert.equal(PlanStore.read(fp), undefined, '删除后读不到')
+  } finally {
+    process.chdir(oldCwd)
+    rmSync(dir, { recursive: true, force: true })
+  }
+})
+
+test('SceneStore：构造不建目录，首次写入才创建 .ai-paint', () => {
+  const dir = mkdtempSync(join(tmpdir(), 'ai-paint-store-'))
+  const oldCwd = process.cwd()
+  process.chdir(dir)
+  try {
+    const store = new SceneStore()
+    assert.equal(existsSync(join(dir, '.ai-paint')), false, '仅构造不应创建目录')
+    store.create('demo')
+    assert.equal(existsSync(join(dir, '.ai-paint', 'demo.json')), true, '首次写入应创建目录并落盘')
   } finally {
     process.chdir(oldCwd)
     rmSync(dir, { recursive: true, force: true })
