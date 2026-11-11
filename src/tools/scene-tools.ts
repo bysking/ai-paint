@@ -64,7 +64,10 @@ export function registerSceneTools(reg: ToolRegistry, store: SceneStore): void {
       additionalProperties: false,
     },
     handler: async (args) => {
-      const scene = store.getOrCreate(str(args.name))
+      // 只读：不存在的场景名直接报错，不落盘（getOrCreate 会建空场景并写盘）
+      const name = str(args.name)
+      const scene = store.peek(name)
+      if (!scene) throw new Error(`scene "${name}" does not exist — use list_scenes to see available scenes`)
       const summary = summarize(scene)
       if (bool(args.include_elements, true)) {
         return { ...summary, elements: scene.elements }
@@ -173,7 +176,10 @@ export function registerSceneTools(reg: ToolRegistry, store: SceneStore): void {
       additionalProperties: false,
     },
     handler: async (args) => {
-      const scene = store.getOrCreate(str(args.scene))
+      // 只读：不存在的场景名直接报错，不落盘
+      const name = str(args.scene)
+      const scene = store.peek(name)
+      if (!scene) throw new Error(`scene "${name}" does not exist — use list_scenes to see available scenes`)
       return { svg: renderSceneSvg(scene) }
     },
   })

@@ -3,7 +3,7 @@
  * Sessions are keyed by scene name; files live in <cwd>/.ai-paint/.
  */
 
-import { mkdirSync, readFileSync, writeFileSync } from 'node:fs'
+import { mkdirSync, readFileSync, rmSync, writeFileSync } from 'node:fs'
 import { join } from 'node:path'
 import { blankScene, type Scene } from '../core/scene.js'
 
@@ -37,13 +37,22 @@ export class SceneStore {
     return this.scenes.get(name)
   }
 
+  /**
+   * 只读查找：内存 → 磁盘，绝不创建。
+   *
+   * 与 getOrCreate 的区别就在未命中时：peek 返回 undefined，getOrCreate 会建一个
+   * 空场景并 save() 落盘。只读工具（get_scene / get_scene_svg）走这里 ——
+   * 读一个不存在的场景名不该在 cwd/.ai-paint 里凭空多出一个空 json。
+   */
+  peek(name: string): Scene | undefined {
+    return this.scenes.get(name) ?? this.loadFromDisk(name)
+  }
+
   getOrCreate(name: string): Scene {
-    const existing = this.scenes.get(name)
-    if (existing) return existing
-    const onDisk = this.loadFromDisk(name)
-    if (onDisk) {
-      this.scenes.set(name, onDisk)
-      return onDisk
+    const found = this.peek(name)
+    if (found) {
+      this.scenes.set(name, found)
+      return found
     }
     return this.create(name)
   }
@@ -67,7 +76,9 @@ export class SceneStore {
     const had = this.scenes.delete(name)
     if (had) {
       try {
-        const { rmSync } = require('node:fs') as typeof import('node:fs')
+        // 必须用 ESM import 的 rmSync：本包是 "type": "module"，
+        // require('node:fs') 会抛 ERR_REQUIRE_ESM，被下面的 catch 吞掉后
+        // 文件根本删不掉（delete_scene 报成功但磁盘上的 json 还在）。
         rmSync(this.fileFor(name), { force: true })
       } catch {
         /* ignore */
@@ -78,6 +89,7 @@ export class SceneStore {
 
   save(scene: Scene): void {
     try {
+      // 唯一的建目录点：只有真的要落盘时才创建，构造/只读查找都不碰磁盘。
       mkdirSync(this.dir, { recursive: true })
       writeFileSync(this.fileFor(scene.name), JSON.stringify(scene, null, 2), 'utf8')
     } catch (err) {

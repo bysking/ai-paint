@@ -1,6 +1,6 @@
 {
   "name": "@bysking/ai-paint",
-  "version": "1.0.6",
+  "version": "1.0.7",
   "description": "支持流程图，架构图，时序图，ER图，支持导出Excalidraw二次编辑，风格的手绘画布绘图引擎MCP（TypeScript），封装为面向AI代理的MCP服务器",
   "type": "module",
   "author": "bysking@qq.com",

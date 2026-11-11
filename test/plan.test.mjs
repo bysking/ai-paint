@@ -249,6 +249,41 @@ test('SceneStore：构造不建目录，首次写入才创建 .ai-paint', () => 
   }
 })
 
+test('SceneStore.peek：只读查找不创建场景、不建目录', () => {
+  const dir = mkdtempSync(join(tmpdir(), 'ai-paint-peek-'))
+  const oldCwd = process.cwd()
+  process.chdir(dir)
+  try {
+    const store = new SceneStore()
+    assert.equal(store.peek('ghost'), undefined, '未命中的只读查找应返回 undefined')
+    assert.equal(existsSync(join(dir, '.ai-paint')), false, 'peek 未命中不应创建目录')
+    store.create('real')
+    rmSync(join(dir, '.ai-paint', 'real.json'), { force: true })
+    assert.equal(store.get('real')?.name, 'real', '内存中仍可读')
+  } finally {
+    process.chdir(oldCwd)
+    rmSync(dir, { recursive: true, force: true })
+  }
+})
+
+test('SceneStore.delete：ESM 下也能真正删掉磁盘文件', () => {
+  const dir = mkdtempSync(join(tmpdir(), 'ai-paint-del-'))
+  const oldCwd = process.cwd()
+  process.chdir(dir)
+  try {
+    const store = new SceneStore()
+    store.create('gone')
+    const file = join(dir, '.ai-paint', 'gone.json')
+    assert.equal(existsSync(file), true, '创建后文件应在磁盘上')
+    assert.equal(store.delete('gone'), true)
+    assert.equal(existsSync(file), false, 'delete 必须真正删除文件（require 版曾静默失败）')
+    assert.equal(store.getOrCreate('gone').name, 'gone', '删除后可重新创建')
+  } finally {
+    process.chdir(oldCwd)
+    rmSync(dir, { recursive: true, force: true })
+  }
+})
+
 // ---------- 绘制（全链路 create_diagram 的绘制侧） ----------
 
 test('drawFlowScene：把 FinalPlan 渲染为场景（节点+边），SVG 可渲染', async () => {
